@@ -1,0 +1,32 @@
+# Runtime data and artifacts (always regenerated from fixed seeds)
+data/
+reports/
+audit/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+*.jsonl.head
+# Local secrets -- never commit
+secret.txt
+.env
+.maskline-secret*
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.benchmarks/
+.coverage
+htmlcov/
+.trace/
+node_modules/
+*.pyc

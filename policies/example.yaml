@@ -1,0 +1,67 @@
+# Example policy for the synthetic data produced by `maskline demo`.
+# Paths are matched against the dataset filename (and full path). Use "*" with
+# care: it may match more datasets than intended, so explicit names are safer.
+version: 1
+name: demo-local-masking
+description: Demonstrate every built-in transformer on synthetic local data.
+
+datasets:
+  - path: "demo.sqlite"
+    tables:
+      customers:
+        columns:
+          full_name:
+            transformer: pseudonym
+          phone:
+            transformer: mask
+            params: { keep_prefix: 3, keep_suffix: 4 }
+          email:
+            transformer: hash
+          id_card:
+            transformer: mask
+            params: { keep_prefix: 2, keep_suffix: 2 }
+          bank_card:
+            transformer: mask
+            params: { keep_prefix: 4, keep_suffix: 4 }
+          address:
+            transformer: generalize
+            params: { mode: address }
+          birth_date:
+            transformer: generalize
+            params: { mode: date, level: month }
+          age:
+            transformer: generalize
+            params: { mode: age, width: 10 }
+          balance:
+            transformer: round
+            params: { decimals: 0 }
+          notes:
+            transformer: nullify
+      orders:
+        columns:
+          amount:
+            transformer: round
+            params: { decimals: 2 }
+          ip_address:
+            transformer: mask
+            params: { keep_prefix: 0, keep_suffix: 0 }
+          contact_phone:
+            transformer: mask
+            params: { keep_prefix: 3, keep_suffix: 4 }
+  - path: "leads.csv"
+    tables:
+      leads:
+        columns:
+          contact_name:
+            transformer: pseudonym
+          mobile:
+            transformer: mask
+            params: { keep_prefix: 3, keep_suffix: 4 }
+          email:
+            transformer: hash
+          address:
+            transformer: generalize
+            params: { mode: address }
+          company_code:
+            transformer: mask
+            params: { keep_prefix: 2, keep_suffix: 4 }
