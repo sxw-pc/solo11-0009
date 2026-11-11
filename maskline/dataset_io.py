@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
 import re
 import sqlite3
@@ -12,6 +13,16 @@ from .utils import MasklineError, quote_ident, sqlite_connect_readonly
 
 SQLITE_EXTENSIONS = {".sqlite", ".sqlite3", ".db"}
 CSV_EXTENSIONS = {".csv"}
+CSV_SNIFF_BYTES = 1 << 22
+CSV_BOMS = (
+    # UTF-32 markers must be checked before their UTF-16 prefixes.
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+CSV_FALLBACK_ENCODINGS = ("utf-8", "gb18030")
 
 
 class DatasetError(MasklineError):
@@ -78,8 +89,38 @@ def sqlite_columns(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]
     ]
 
 
+def detect_csv_encoding(path: Path) -> str:
+    """Detect a CSV text encoding without requiring third-party packages.
+
+    BOM-marked files are unambiguous.  Otherwise prefer UTF-8 and fall back to
+    GB18030, which is a strict superset of GBK/GB2312 and decodes the files
+    produced by common Chinese spreadsheet exports.  An incremental decoder
+    is used so a truncated multibyte character at the sample boundary is not
+    mistaken for an encoding error.
+    """
+    with path.open("rb") as fh:
+        sample = fh.read(CSV_SNIFF_BYTES)
+    for bom, encoding in CSV_BOMS:
+        if sample.startswith(bom):
+            return encoding
+    for encoding in CSV_FALLBACK_ENCODINGS:
+        try:
+            decoder = codecs.getincrementaldecoder(encoding)(errors="strict")
+            decoder.decode(sample, final=False)
+        except UnicodeDecodeError:
+            continue
+        return encoding
+    raise DatasetError(
+        f"CSV file is neither valid UTF-8 nor GBK/GB18030 text: {path}"
+    )
+
+
+def _open_csv_text(path: Path):
+    return path.open("r", encoding=detect_csv_encoding(path), newline="")
+
+
 def read_csv_header(path: Path) -> list[str]:
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+    with _open_csv_text(path) as fh:
         reader = csv.reader(fh)
         try:
             header = next(reader)
@@ -93,7 +134,7 @@ def read_csv_header(path: Path) -> list[str]:
 
 
 def iter_csv_dicts(path: Path) -> Iterator[dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+    with _open_csv_text(path) as fh:
         reader = csv.DictReader(fh)
         for row in reader:
             yield {key: (value if value is not None else "") for key, value in row.items()}
@@ -101,7 +142,7 @@ def iter_csv_dicts(path: Path) -> Iterator[dict[str, str]]:
 
 def iter_csv_tuples(path: Path) -> Iterator[tuple[str, ...]]:
     header = read_csv_header(path)
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+    with _open_csv_text(path) as fh:
         reader = csv.reader(fh)
         next(reader)
         for row in reader:
@@ -141,7 +182,8 @@ def read_column_samples(
         try:
             rows = conn.execute(
                 f"SELECT {quote_ident(column)} FROM {quote_ident(table)} "
-                f"WHERE {quote_ident(column)} IS NOT NULL LIMIT ?",
+                f"WHERE {quote_ident(column)} IS NOT NULL "
+                f"ORDER BY rowid LIMIT ?",
                 (limit,),
             ).fetchall()
             return [row[0] for row in rows]

@@ -23,6 +23,134 @@ from .dataset_io import (
 )
 from .utils import canonical_json, normalize_sqlite_value, quote_ident
 
+DATASETS_DDL = """
+CREATE TABLE IF NOT EXISTS datasets (
+    fingerprint TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    row_count INTEGER NOT NULL,
+    tables_json TEXT NOT NULL,
+    registered_at TEXT NOT NULL
+);
+"""
+FINDINGS_DDL = """
+CREATE TABLE IF NOT EXISTS findings (
+    dataset_fingerprint TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    sensitive_type TEXT,
+    confidence TEXT NOT NULL DEFAULT 'none',
+    score REAL NOT NULL DEFAULT 0,
+    hit_rate REAL NOT NULL DEFAULT 0,
+    validate_rate REAL NOT NULL DEFAULT 0,
+    sample_size INTEGER NOT NULL DEFAULT 0,
+    candidates_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (dataset_fingerprint, table_name, column_name)
+);
+"""
+DATASET_COLUMNS = {
+    "fingerprint": "TEXT NOT NULL DEFAULT ''",
+    "path": "TEXT NOT NULL DEFAULT ''",
+    "kind": "TEXT NOT NULL DEFAULT ''",
+    "size_bytes": "INTEGER NOT NULL DEFAULT 0",
+    "row_count": "INTEGER NOT NULL DEFAULT 0",
+    "tables_json": "TEXT NOT NULL DEFAULT '[]'",
+    "registered_at": "TEXT NOT NULL DEFAULT ''",
+}
+FINDING_COLUMNS = {
+    "dataset_fingerprint": "TEXT NOT NULL DEFAULT ''",
+    "table_name": "TEXT NOT NULL DEFAULT ''",
+    "column_name": "TEXT NOT NULL DEFAULT ''",
+    "sensitive_type": "TEXT",
+    "confidence": "TEXT NOT NULL DEFAULT 'none'",
+    "score": "REAL NOT NULL DEFAULT 0",
+    "hit_rate": "REAL NOT NULL DEFAULT 0",
+    "validate_rate": "REAL NOT NULL DEFAULT 0",
+    "sample_size": "INTEGER NOT NULL DEFAULT 0",
+    "candidates_json": "TEXT NOT NULL DEFAULT '[]'",
+    "updated_at": "TEXT NOT NULL DEFAULT ''",
+}
+DATASET_KEYS = ("fingerprint",)
+FINDING_KEYS = ("dataset_fingerprint", "table_name", "column_name")
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info({quote_ident(table)})")
+    }
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection, table: str, definitions: dict[str, str]
+) -> None:
+    """Add columns introduced after a registry database was first created."""
+    existing = _table_columns(conn, table)
+    for name, declaration in definitions.items():
+        if name not in existing:
+            conn.execute(
+                f"ALTER TABLE {quote_ident(table)} "
+                f"ADD COLUMN {quote_ident(name)} {declaration}"
+            )
+
+
+def _has_unique_key(
+    conn: sqlite3.Connection, table: str, keys: tuple[str, ...]
+) -> bool:
+    """True when the table has a unique index usable by ON CONFLICT."""
+    wanted = tuple(keys)
+    for index in conn.execute(f"PRAGMA index_list({quote_ident(table)})"):
+        if not int(index[2]):
+            continue
+        columns = tuple(
+            str(row[2])
+            for row in conn.execute(f"PRAGMA index_info({quote_ident(index[1])})")
+        )
+        if columns == wanted:
+            return True
+    return False
+
+
+def _rebuild_table(
+    conn: sqlite3.Connection,
+    table: str,
+    ddl: str,
+    definitions: dict[str, str],
+) -> None:
+    """Recreate a legacy table with the canonical schema, preserving rows."""
+    legacy = f"{table}_legacy"
+    conn.execute(f"DROP TABLE IF EXISTS {quote_ident(legacy)}")
+    conn.execute(f"ALTER TABLE {quote_ident(table)} RENAME TO {quote_ident(legacy)}")
+    conn.executescript(ddl)
+    names = list(definitions)
+    select = []
+    for name in names:
+        default = "0" if definitions[name].startswith(("INTEGER", "REAL")) else "''"
+        select.append(f"COALESCE({quote_ident(name)}, {default})")
+    conn.execute(
+        f"INSERT OR REPLACE INTO {quote_ident(table)} "
+        f"({', '.join(quote_ident(name) for name in names)}) "
+        f"SELECT {', '.join(select)} FROM {quote_ident(legacy)}"
+    )
+    conn.execute(f"DROP TABLE {quote_ident(legacy)}")
+
+
+def _json_value(value: Any, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed
+
+
+def _json_list(value: Any) -> list[Any]:
+    parsed = _json_value(value, [])
+    return parsed if isinstance(parsed, list) else []
+
 
 @dataclass(frozen=True)
 class ColumnInfo:
@@ -150,34 +278,18 @@ class Catalog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS datasets (
-                fingerprint TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                row_count INTEGER NOT NULL,
-                tables_json TEXT NOT NULL,
-                registered_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS findings (
-                dataset_fingerprint TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                column_name TEXT NOT NULL,
-                sensitive_type TEXT,
-                confidence TEXT NOT NULL DEFAULT 'none',
-                score REAL NOT NULL DEFAULT 0,
-                hit_rate REAL NOT NULL DEFAULT 0,
-                validate_rate REAL NOT NULL DEFAULT 0,
-                sample_size INTEGER NOT NULL DEFAULT 0,
-                candidates_json TEXT NOT NULL DEFAULT '[]',
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (dataset_fingerprint, table_name, column_name)
-            );
-            """
-        )
+        self.conn.executescript(DATASETS_DDL + FINDINGS_DDL)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Upgrade registries written by older maskline versions in place."""
+        _ensure_columns(self.conn, "datasets", DATASET_COLUMNS)
+        _ensure_columns(self.conn, "findings", FINDING_COLUMNS)
+        if not _has_unique_key(self.conn, "datasets", DATASET_KEYS):
+            _rebuild_table(self.conn, "datasets", DATASETS_DDL, DATASET_COLUMNS)
+        if not _has_unique_key(self.conn, "findings", FINDING_KEYS):
+            _rebuild_table(self.conn, "findings", FINDINGS_DDL, FINDING_COLUMNS)
 
     def close(self) -> None:
         self.conn.close()
@@ -219,7 +331,7 @@ class Catalog:
         result = []
         for row in rows:
             item = dict(row)
-            item["tables"] = json.loads(item.pop("tables_json"))
+            item["tables"] = _json_value(item.pop("tables_json"), [])
             result.append(item)
         return result
 
@@ -230,10 +342,36 @@ class Catalog:
         if not row:
             return None
         item = dict(row)
-        item["tables"] = json.loads(item.pop("tables_json"))
+        item["tables"] = _json_value(item.pop("tables_json"), [])
         return item
 
     def save_finding(self, record: dict[str, Any]) -> None:
+        candidates_json = json.dumps(
+            record.get("candidates", []), ensure_ascii=False
+        )
+        values = (
+            record.get("sensitive_type"),
+            record.get("confidence", "none"),
+            float(record.get("score", 0.0)),
+            float(record.get("hit_rate", 0.0)),
+            float(record.get("validate_rate", 0.0)),
+            int(record.get("sample_size", 0)),
+            candidates_json,
+        )
+        existing = self.conn.execute(
+            "SELECT sensitive_type, confidence, score, hit_rate, validate_rate, "
+            "sample_size, candidates_json FROM findings "
+            "WHERE dataset_fingerprint = ? AND table_name = ? AND column_name = ?",
+            (
+                record["dataset_fingerprint"],
+                record["table_name"],
+                record["column_name"],
+            ),
+        ).fetchone()
+        # Repeated scans of an unchanged dataset must leave the stored
+        # discovery result (including its updated_at timestamp) untouched.
+        if existing is not None and tuple(existing) == values:
+            return
         self.conn.execute(
             """
             INSERT INTO findings (
@@ -261,7 +399,7 @@ class Catalog:
                 float(record.get("hit_rate", 0.0)),
                 float(record.get("validate_rate", 0.0)),
                 int(record.get("sample_size", 0)),
-                json.dumps(record.get("candidates", []), ensure_ascii=False),
+                candidates_json,
                 _now(),
             ),
         )
@@ -276,7 +414,7 @@ class Catalog:
         result = []
         for row in rows:
             item = dict(row)
-            item["candidates"] = json.loads(item.pop("candidates_json"))
+            item["candidates"] = _json_list(item.pop("candidates_json", None))
             result.append(item)
         return result
 

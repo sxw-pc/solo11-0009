@@ -29,6 +29,29 @@ ADDRESS_RE = re.compile(
     r"小区|大厦|广场|苑|园)"
 )
 
+# "号" also appears in labels such as 手机号码/身份证号/银行卡号.  Those
+# values are not postal addresses, so keep them available to the structured
+# detectors instead of suppressing them as address text.
+_NON_ADDRESS_MARKERS = (
+    "电话号码", "手机号码", "手机号", "电话号", "身份证号", "证件号", "证件号码",
+    "银行卡号", "账号", "编号", "单号",
+)
+
+
+def looks_like_address(value: str) -> bool:
+    """Heuristic: a value that carries Chinese address vocabulary."""
+    if len(value) < 4:
+        return False
+    match = ADDRESS_RE.search(value)
+    if match is None:
+        return False
+    if any(marker in value for marker in _NON_ADDRESS_MARKERS):
+        # Labels like 手机号/身份证号 are not addresses.  Still accept values
+        # whose real address token appears elsewhere in the same cell.
+        remainder = value[: match.start()] + value[match.end() :]
+        return ADDRESS_RE.search(remainder) is not None
+    return True
+
 
 class PersonNameDetector:
     sensitive_type = "person_name"
@@ -49,7 +72,7 @@ class AddressDetector:
         matches = [
             value
             for value in values
-            if len(value) >= 4 and ADDRESS_RE.search(value)
+            if looks_like_address(value)
         ]
         return score_candidate(self.sensitive_type, len(values), matches)
 
