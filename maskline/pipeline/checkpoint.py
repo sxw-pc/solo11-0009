@@ -33,6 +33,26 @@ class TableCheckpoint:
     rows_done: int
     updated_at: str
     counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    skipped_rows: int = 0
+    skipped_rowids: tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class RunEvent:
+    run_id: str
+    seq: int
+    event: str
+    ts: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "seq": self.seq,
+            "event": self.event,
+            "ts": self.ts,
+            "details": dict(self.details),
+        }
 
 
 class CheckpointStore:
@@ -42,30 +62,62 @@ class CheckpointStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id TEXT PRIMARY KEY,
-                dataset_path TEXT NOT NULL,
-                dataset_fingerprint TEXT NOT NULL,
-                policy_path TEXT NOT NULL,
-                policy_fingerprint TEXT NOT NULL,
-                output_path TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                run_id TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                last_rowid INTEGER NOT NULL,
-                rows_done INTEGER NOT NULL,
-                updated_at TEXT NOT NULL,
-                counts_json TEXT NOT NULL DEFAULT '{}',
-                PRIMARY KEY (run_id, table_name)
-            );
-            """
-        )
+        existing = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not {"runs", "checkpoints", "run_events"}.issubset(existing):
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id TEXT PRIMARY KEY,
+                    dataset_path TEXT NOT NULL,
+                    dataset_fingerprint TEXT NOT NULL,
+                    policy_path TEXT NOT NULL,
+                    policy_fingerprint TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    run_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    last_rowid INTEGER NOT NULL,
+                    rows_done INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    counts_json TEXT NOT NULL DEFAULT '{}',
+                    skipped_rows INTEGER NOT NULL DEFAULT 0,
+                    skipped_rowids_json TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY (run_id, table_name)
+                );
+                CREATE TABLE IF NOT EXISTS run_events (
+                    run_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    event TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (run_id, seq)
+                );
+                """
+            )
+        # Migration for checkpoint databases written by earlier versions,
+        # which predate per-table skip accounting.
+        columns = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(checkpoints)")
+        }
+        if "skipped_rows" not in columns:
+            self.conn.execute(
+                "ALTER TABLE checkpoints ADD COLUMN skipped_rows INTEGER NOT NULL DEFAULT 0"
+            )
+        if "skipped_rowids_json" not in columns:
+            self.conn.execute(
+                "ALTER TABLE checkpoints ADD COLUMN "
+                "skipped_rowids_json TEXT NOT NULL DEFAULT '[]'"
+            )
         self.conn.commit()
 
     def close(self) -> None:
@@ -106,24 +158,71 @@ class CheckpointStore:
         last_rowid: int,
         rows_done: int,
         counts: dict[str, dict[str, int]] | None = None,
+        skipped_rows: int = 0,
+        skipped_rowids: list[int] | tuple[int, ...] | None = None,
     ) -> None:
         now = _now()
         payload = json.dumps(counts or {}, sort_keys=True)
+        rowid_payload = json.dumps(list(skipped_rowids or []))
         self.conn.execute(
             """
             INSERT INTO checkpoints
-                (run_id, table_name, last_rowid, rows_done, updated_at, counts_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (run_id, table_name, last_rowid, rows_done, updated_at,
+                 counts_json, skipped_rows, skipped_rowids_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, table_name) DO UPDATE SET
                 last_rowid=excluded.last_rowid,
                 rows_done=excluded.rows_done,
                 updated_at=excluded.updated_at,
-                counts_json=excluded.counts_json
+                counts_json=excluded.counts_json,
+                skipped_rows=excluded.skipped_rows,
+                skipped_rowids_json=excluded.skipped_rowids_json
             """,
-            (run_id, table_name, last_rowid, rows_done, now, payload),
+            (
+                run_id, table_name, last_rowid, rows_done, now, payload,
+                skipped_rows, rowid_payload,
+            ),
         )
         self.conn.execute("UPDATE runs SET updated_at = ? WHERE run_id = ?", (now, run_id))
         self.conn.commit()
+
+    def add_event(
+        self,
+        run_id: str,
+        event: str,
+        details: dict[str, Any] | None = None,
+        ts: str | None = None,
+    ) -> RunEvent:
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM run_events WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        record = RunEvent(
+            run_id=run_id,
+            seq=int(row["last_seq"]) + 1,
+            event=event,
+            ts=ts or _now(),
+            details=dict(details or {}),
+        )
+        self.conn.execute(
+            "INSERT INTO run_events (run_id, seq, event, ts, details_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                record.run_id,
+                record.seq,
+                record.event,
+                record.ts,
+                json.dumps(record.details, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        self.conn.commit()
+        return record
+
+    def list_events(self, run_id: str) -> list[RunEvent]:
+        rows = self.conn.execute(
+            "SELECT * FROM run_events WHERE run_id = ? ORDER BY seq", (run_id,)
+        ).fetchall()
+        return [_event_from_row(row) for row in rows]
 
     def get_checkpoint(self, run_id: str, table_name: str) -> TableCheckpoint | None:
         row = self.conn.execute(
@@ -146,6 +245,14 @@ class CheckpointStore:
 
 
 def _checkpoint_from_row(row: sqlite3.Row) -> TableCheckpoint:
+    keys = row.keys()
+    skipped_rows = int(row["skipped_rows"]) if "skipped_rows" in keys else 0
+    if "skipped_rowids_json" in keys:
+        skipped_rowids = tuple(
+            int(value) for value in json.loads(row["skipped_rowids_json"] or "[]")
+        )
+    else:
+        skipped_rowids = ()
     return TableCheckpoint(
         run_id=row["run_id"],
         table_name=row["table_name"],
@@ -153,6 +260,18 @@ def _checkpoint_from_row(row: sqlite3.Row) -> TableCheckpoint:
         rows_done=int(row["rows_done"]),
         updated_at=row["updated_at"],
         counts=json.loads(row["counts_json"] or "{}"),
+        skipped_rows=skipped_rows,
+        skipped_rowids=skipped_rowids,
+    )
+
+
+def _event_from_row(row: sqlite3.Row) -> RunEvent:
+    return RunEvent(
+        run_id=row["run_id"],
+        seq=int(row["seq"]),
+        event=row["event"],
+        ts=row["ts"],
+        details=json.loads(row["details_json"] or "{}"),
     )
 
 

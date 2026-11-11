@@ -150,34 +150,41 @@ class Catalog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS datasets (
-                fingerprint TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                size_bytes INTEGER NOT NULL,
-                row_count INTEGER NOT NULL,
-                tables_json TEXT NOT NULL,
-                registered_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS findings (
-                dataset_fingerprint TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                column_name TEXT NOT NULL,
-                sensitive_type TEXT,
-                confidence TEXT NOT NULL DEFAULT 'none',
-                score REAL NOT NULL DEFAULT 0,
-                hit_rate REAL NOT NULL DEFAULT 0,
-                validate_rate REAL NOT NULL DEFAULT 0,
-                sample_size INTEGER NOT NULL DEFAULT 0,
-                candidates_json TEXT NOT NULL DEFAULT '[]',
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (dataset_fingerprint, table_name, column_name)
-            );
-            """
-        )
-        self.conn.commit()
+        existing = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not {"datasets", "findings"}.issubset(existing):
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS datasets (
+                    fingerprint TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    tables_json TEXT NOT NULL,
+                    registered_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS findings (
+                    dataset_fingerprint TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    column_name TEXT NOT NULL,
+                    sensitive_type TEXT,
+                    confidence TEXT NOT NULL DEFAULT 'none',
+                    score REAL NOT NULL DEFAULT 0,
+                    hit_rate REAL NOT NULL DEFAULT 0,
+                    validate_rate REAL NOT NULL DEFAULT 0,
+                    sample_size INTEGER NOT NULL DEFAULT 0,
+                    candidates_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (dataset_fingerprint, table_name, column_name)
+                );
+                """
+            )
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()

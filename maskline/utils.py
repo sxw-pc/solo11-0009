@@ -90,6 +90,11 @@ def normalize_sqlite_value(value: Any) -> Any:
 def sqlite_content_digest(path: Path) -> str:
     """Hash schema plus rows, independent of page layout and row insertion noise."""
     conn = sqlite_connect_readonly(path)
+    # One reusable encoder: encoding 100k short rows via a fresh json.dumps
+    # call each time is the dominant cost for large-dataset reports.
+    encoder = json.JSONEncoder(
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    )
     try:
         digest = hashlib.sha256()
         tables = [
@@ -102,14 +107,27 @@ def sqlite_content_digest(path: Path) -> str:
         for table in tables:
             digest.update(b"\x00table\x00" + table.encode("utf-8"))
             columns = [row[1] for row in conn.execute(f"PRAGMA table_info({quote_ident(table)})")]
-            digest.update(canonical_json(columns).encode("utf-8"))
+            digest.update(encoder.encode(columns).encode("utf-8"))
             order = ", ".join(quote_ident(col) for col in columns) or "rowid"
             rows = conn.execute(
                 f"SELECT * FROM {quote_ident(table)} ORDER BY {order}"
             )
             for row in rows:
-                payload = [normalize_sqlite_value(value) for value in tuple(row)]
-                digest.update(canonical_json(payload).encode("utf-8"))
+                # Fast path when every value is None/str/int: those types need
+                # no special normalization, so skip both the per-value wrap and
+                # the generator machinery of an all() check.
+                plain = True
+                for value in row:
+                    if value is not None and not isinstance(value, (str, int)):
+                        plain = False
+                        break
+                if plain:
+                    payload = encoder.encode(list(row))
+                else:
+                    payload = encoder.encode(
+                        [normalize_sqlite_value(value) for value in row]
+                    )
+                digest.update(payload.encode("utf-8"))
                 digest.update(b"\n")
         return digest.hexdigest()
     finally:

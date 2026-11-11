@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..dataset_io import iter_csv_tuples, iter_table_rows, sqlite_schema_sql
+from ..dataset_io import iter_csv_raw_tuples, iter_csv_tuples, iter_table_rows, sqlite_schema_sql
 from ..registry import DatasetInventory, TableInfo
 from ..transformers import REGISTRY, TransformContext
 from ..utils import quote_ident
@@ -30,10 +30,11 @@ def merge_counts(
 
 
 def csv_batches(
-    path: Path, after: int, size: int
+    path: Path, after: int, size: int, *, raw: bool = False
 ) -> Iterator[list[tuple[int, tuple[str, ...]]]]:
     batch: list[tuple[int, tuple[str, ...]]] = []
-    for index, row in enumerate(iter_csv_tuples(path), start=1):
+    iterator = iter_csv_raw_tuples(path) if raw else iter_csv_tuples(path)
+    for index, row in enumerate(iterator, start=1):
         if index <= after:
             continue
         batch.append((index, row))
@@ -48,7 +49,7 @@ def source_batches(
     inventory: DatasetInventory, table: TableInfo, after: int, size: int
 ) -> Iterator[list[tuple[int, tuple[Any, ...]]]]:
     if inventory.kind == "csv":
-        yield from csv_batches(inventory.path, after, size)
+        yield from csv_batches(inventory.path, after, size, raw=True)
         return
     cursor = after
     while True:
@@ -104,12 +105,14 @@ def transform_row(
         counts = table_counts.setdefault(
             policy.transformer, {"seen": 0, "processed": 0, "changed": 0}
         )
-        counts["seen"] += 1
-        if value is not None and value != "":
-            counts["processed"] += 1
         context.table = table.name
         context.column = column.name
         transformed = REGISTRY.get(policy.transformer).transform(value, policy.params, context)
+        # Counters move only after a successful transform so a row that raises
+        # is skipped wholesale instead of leaking a half-recorded "seen".
+        counts["seen"] += 1
+        if value is not None and value != "":
+            counts["processed"] += 1
         if transformed != value:
             counts["changed"] += 1
         output.append(transformed)

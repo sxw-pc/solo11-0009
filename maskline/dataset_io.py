@@ -101,13 +101,24 @@ def iter_csv_dicts(path: Path) -> Iterator[dict[str, str]]:
 
 def iter_csv_tuples(path: Path) -> Iterator[tuple[str, ...]]:
     header = read_csv_header(path)
+    for row in iter_csv_raw_tuples(path):
+        if len(row) < len(header):
+            row = row + ("",) * (len(header) - len(row))
+        yield tuple(row[: len(header)])
+
+
+def iter_csv_raw_tuples(path: Path) -> Iterator[tuple[str, ...]]:
+    """Yield CSV data rows exactly as parsed, without padding or truncation.
+
+    The raw arity lets the pipeline spot malformed rows instead of silently
+    papering over them; detectors keep using the padded iterator.
+    """
+    read_csv_header(path)  # validates the header before streaming data
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.reader(fh)
         next(reader)
         for row in reader:
-            if len(row) < len(header):
-                row = row + [""] * (len(header) - len(row))
-            yield tuple(row[: len(header)])
+            yield tuple(row)
 
 
 def iter_table_rows(

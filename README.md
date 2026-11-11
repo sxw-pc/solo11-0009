@@ -189,6 +189,10 @@ python -m maskline audit --verify
 - **登记幂等**：同一内容指纹只登记一次。
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
+- **执行节点留痕**：`run_started` / `run_interrupted` / `run_resumed` / `run_completed`（以及失败时的 `run_failed`）事件持久化在检查点库，并同时写入 Markdown 与 JSON 报告；中断、恢复的完整过程与实际执行一一对应。
+- **异常行跳过**：CSV 中列数与表头不一致、或转换器抛出错误的行会被跳过并计入 `skipped_rows`，跳过的 rowid 持久化在检查点中，多轮中断-恢复也不会重复计数；跳过原因保留有界样本（最多 20 条），不存源值。
+- **报告一致性**：Markdown 与 JSON 报告由同一个内存报告对象渲染，所有统计字段完全一致；生成前会与检查点、manifest、审计头锚点、假名映射库、输出库实际哈希逐项交叉校验，不一致时拒绝出报告。
+- **报告可解析**：`maskline.report.load_report()` 可解析当前及旧版本的两种报告格式；旧报告缺失的新字段按默认值补齐，既有工具无需改造。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。
@@ -202,7 +206,29 @@ python -m maskline audit --verify
 pytest -q
 ```
 
-测试覆盖校验算法正反例、字段发现与误报、六类转换器、端到端执行、dry-run、断点续跑、幂等、假名映射、审计篡改定位、报告告警等。全部测试与演示均不需要网络。
+测试覆盖校验算法正反例、字段发现与误报、六类转换器、端到端执行、dry-run、断点续跑、幂等、假名映射、审计篡改定位、报告告警、双格式报告一致性、异常行跳过与旧报告解析等。全部测试与演示均不需要网络。
+
+## 报告字段与解析
+
+同一次运行的 `reports/<run_id>.md` 与 `reports/<run_id>.json` 共享同一数据源，以下统计在两份报告中逐字段相等，并与实际存储的元数据交叉校验：
+
+- `rows_processed`（处理行数）、`skipped_rows`（跳过异常行数）、`pseudomap_entries`（假名映射条目数）
+- `dataset_fingerprint`（数据集指纹，与重新检视源数据集的结果一致）
+- `output_hash`（输出库哈希，与输出库实际内容哈希一致）
+- `audit_seq` / `audit_anchor`（审计序列号与链锚点，与 `audit.jsonl.head` 中对应条目的 `entry_hash` 一致）
+- `resumed`（是否经历断点恢复）与 `events`（完整执行节点列表）
+
+程序化读取（兼容旧版本报告，缺失字段补默认值）：
+
+```python
+from maskline.report import load_report
+
+report = load_report("reports/run-xxxx.json")   # 也支持 .md
+print(report["run"]["rows_processed"], report["run"]["skipped_rows"])
+print([event["event"] for event in report["events"]])
+```
+
+报告生成按固定 5 行抽样、流式校验，不随数据集行数线性增长内存占用；十万行数据集的报告生成在秒级完成。
 
 ## 常见问题
 

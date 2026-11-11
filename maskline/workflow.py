@@ -72,7 +72,11 @@ def finalize_run(
     result: Any,
     findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    report_paths = generate_report(paths, inventory, policy, result, findings)
+    # The audit entry is appended first so the report can record the actual
+    # chained hash and head anchor instead of recomputing a different value.
     entry = build_audit_entry(result, result.transformer_map)
     audit_entry = AuditLog(paths.audit_path).append(entry)
+    report_paths = generate_report(
+        paths, inventory, policy, result, findings, audit_entry=audit_entry
+    )
     return {"report": report_paths, "audit": audit_entry}

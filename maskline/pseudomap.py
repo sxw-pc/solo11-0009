@@ -33,16 +33,23 @@ class PseudoMap:
             raise PseudoMapError(f"pseudonym mapping database not found: {self.path}")
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pseudonym_map (
-                token TEXT PRIMARY KEY,
-                plaintext TEXT NOT NULL,
-                created_at TEXT NOT NULL
+        existing = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
             )
-            """
-        )
-        self.conn.commit()
+        }
+        if "pseudonym_map" not in existing:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pseudonym_map (
+                    token TEXT PRIMARY KEY,
+                    plaintext TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.commit()
         try:
             os.chmod(self.path, 0o600)
         except OSError:

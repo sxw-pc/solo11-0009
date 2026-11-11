@@ -153,6 +153,10 @@ def build_audit_entry(
         "output_path": str(result.output_path) if result.output_path else None,
         "output_hash": result.output_hash,
         "elapsed_seconds": round(result.elapsed_seconds, 6),
+        "skipped_rows": getattr(result, "skipped_rows", 0),
+        "pseudomap_entries": getattr(result, "pseudomap_entries", 0),
+        "resumed": getattr(result, "resumed", False),
+        "events": getattr(result, "events", []),
     }
     if extra:
         entry.update(extra)
