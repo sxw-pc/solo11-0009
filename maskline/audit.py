@@ -4,14 +4,46 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
 
+try:  # POSIX file locking; the audit log is still usable without it.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+
 GENESIS_HASH = "0" * 64
+
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock(key: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(key, threading.Lock())
+
+
+@contextmanager
+def _audit_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
+    """Serialize audit appends/reads across threads and processes."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _thread_lock(str(lock_path.resolve())):
+        handle = lock_path.open("a+", encoding="utf-8")
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
 
 
 class AuditError(MasklineError):
@@ -42,10 +74,14 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
+        with _audit_lock(self.path, exclusive=True):
+            return self._append_unlocked(entry)
+
+    def _append_unlocked(self, entry: dict[str, Any]) -> dict[str, Any]:
         previous_hash = GENESIS_HASH
         sequence = 1
         if self.path.exists() and self.path.stat().st_size > 0:
-            verification = self.verify()
+            verification = _verify_path(self.path)
             entries = read_audit_entries(self.path)
             previous_hash = verification.head_hash
             sequence = len(entries) + 1
@@ -66,7 +102,8 @@ class AuditLog:
         return stored
 
     def verify(self) -> AuditVerification:
-        return verify_audit(self.path)
+        with _audit_lock(self.path, exclusive=False):
+            return _verify_path(self.path)
 
     def _write_head(self, count: int, last_hash: str) -> None:
         payload = {"count": count, "last_hash": last_hash}
@@ -98,6 +135,11 @@ def read_audit_entries(path: str | Path) -> list[dict[str, Any]]:
 
 def verify_audit(path: str | Path) -> AuditVerification:
     log_path = Path(path)
+    with _audit_lock(log_path, exclusive=False):
+        return _verify_path(log_path)
+
+
+def _verify_path(log_path: Path) -> AuditVerification:
     if not log_path.exists():
         raise AuditError(f"audit log not found: {log_path}")
     entries = read_audit_entries(log_path)
@@ -154,6 +196,9 @@ def build_audit_entry(
         "output_hash": result.output_hash,
         "elapsed_seconds": round(result.elapsed_seconds, 6),
     }
+    mapping = getattr(result, "mapping", None)
+    if mapping is not None:
+        entry["mapping"] = mapping
     if extra:
         entry.update(extra)
     return entry

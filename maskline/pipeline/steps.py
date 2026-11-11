@@ -65,8 +65,9 @@ def create_target(inventory: DatasetInventory, output: Path) -> None:
         candidate = Path(str(output) + suffix)
         if candidate.exists():
             candidate.unlink()
-    conn = sqlite3.connect(output)
+    conn = sqlite3.connect(output, timeout=30.0)
     try:
+        conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA journal_mode=DELETE")
         if inventory.kind == "sqlite":
             schemas = sqlite_schema_sql(inventory.path)

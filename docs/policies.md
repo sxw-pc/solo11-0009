@@ -116,8 +116,12 @@ phone:
 无参数。
 
 - 使用密钥文件中的 `pseudonym_key`，对原文做 HMAC-SHA256 并取前 40 位，输出形如 `psn_...`。
-- 同一密钥、同一原文跨表、跨运行得到同一假名；不同原文不同假名。
+- 同一密钥、同一原文跨表、跨运行、跨 CSV/SQLite 数据集得到同一假名；不同原文不同假名。
 - 明文/假名映射写入独立文件 `data/pseudomap.sqlite`。`python -m maskline reveal --token <token>` 可还原。
+- 写入是幂等的：重复执行同一原文不会新增条目，也不会替换已有条目；已有 token 对应不同原文时会拒绝写入并报 `PseudonymCollision`。
+- 并发安全：多个任务可同时写同一个映射库，写入通过原子冲突处理与 SQLite busy timeout 串行化，不会出现脏写或映射冲突。
+- 映射操作记录写入 `pseudonym_map_operations` 表（仅 token、动作、run_id、时间，不含原文），并汇总到审计条目的 `mapping` 字段；历史脱敏输出始终可用同一映射库还原。
+- 兼容旧版映射库：现有 `pseudonym_map` 表结构与数据保持不变；缺少 `created_at` 的旧库只会追加该可空列，不会被重建。
 - `NULL`、空串原样返回。
 - 映射库等同密钥：离开映射库无法还原；持有映射库的人可还原全部假名。不要与脱敏输出一起交付。
 - dry-run 会计算假名但不写映射库，因此 dry-run 输出不可用于后续还原。

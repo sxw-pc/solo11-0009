@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- 假名映射写入改为原子且幂等：同一原文/同一 token 重复执行不新增、不覆盖条目。
+- 并发写同一个 `pseudomap.sqlite` 时使用冲突处理与 busy timeout，避免 `UNIQUE constraint` 与 `database is locked`。
+- 新增 `pseudonym_map_operations` 操作台账（不含原文），审计条目的 `mapping` 字段记录本次运行的插入、复用、冲突及可追溯操作。
+- 兼容旧版映射库表结构；旧库可直接读取、还原并继续追加，无需重新生成。
+- 审计日志的追加与校验增加跨线程/跨进程文件锁，避免并发运行破坏哈希链。
+
 ## v0.1.0
 
 首个可用版本，全部功能离线运行。

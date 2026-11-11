@@ -45,6 +45,7 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    mapping: dict[str, Any] | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -174,8 +175,9 @@ def execute_run(
             if _requires_secret(rule):
                 if secrets_store is None:
                     raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
-                mapping = PseudoMap(paths.pseudomap_db, create=True)
-            target = sqlite3.connect(output)
+                mapping = PseudoMap(paths.pseudomap_db, create=True, run_id=run_id)
+            target = sqlite3.connect(output, timeout=30.0)
+            target.execute("PRAGMA busy_timeout = 30000")
             target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
                 secrets=secrets_store, pseudomap=mapping, write_mapping=True
@@ -219,6 +221,10 @@ def execute_run(
                 policy_changed=False, dry_run=True,
             )
         assert store is not None and output is not None
+        mapping_info: dict[str, Any] | None = None
+        if mapping is not None:
+            mapping.commit()
+            mapping_info = mapping.summary()
         store.set_status(run_id, "completed")
         output_hash = sqlite_content_digest(output)
         final_counts: dict[str, dict[str, int]] = {}
@@ -239,6 +245,7 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            mapping=mapping_info,
         )
     except PipelineInterrupted:
         if store is not None:
