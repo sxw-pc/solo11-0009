@@ -5,11 +5,13 @@ from __future__ import annotations
 import copy
 import sqlite3
 import time
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..audit import AuditLog, build_audit_entry
 from ..config import Paths, SecretStore
 from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
@@ -45,6 +47,7 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    audit_entry: dict[str, Any] | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -92,14 +95,20 @@ def _prepare_target(
     output = output.expanduser().resolve()
     if output == inventory.path.resolve():
         raise PipelineError("refusing to write the target over the source dataset")
-    create_target(inventory, output)
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    store.create_run(
-        RunRecord(
-            run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
-            policy.fingerprint, str(output), "running", now, now,
+    try:
+        create_target(inventory, output)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        store.create_run(
+            RunRecord(
+                run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
+                policy.fingerprint, str(output), "running", now, now,
+            )
         )
-    )
+    except Exception:
+        # Never leave a deliverable-looking target behind for a run that
+        # could not even be registered (e.g. the disk is full).
+        _discard_output(output)
+        raise
     return output
 
 
@@ -142,6 +151,25 @@ def _process_table(
     return after, rows_done, table_counts
 
 
+def _discard_output(output: Path) -> None:
+    """Best-effort removal of a failed run's target database.
+
+    A run that fails must not leave a deliverable-looking database behind:
+    without its audit entry the output is dirty data, so it is rolled back.
+    """
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = Path(str(output) + suffix)
+        try:
+            candidate.unlink(missing_ok=True)
+        except OSError as exc:
+            warnings.warn(
+                f"could not remove {candidate} while rolling back a failed "
+                f"run: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+
 def execute_run(
     inventory: DatasetInventory,
     policy: Policy,
@@ -164,6 +192,7 @@ def execute_run(
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
+    output: Path | None = None
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
@@ -219,7 +248,6 @@ def execute_run(
                 policy_changed=False, dry_run=True,
             )
         assert store is not None and output is not None
-        store.set_status(run_id, "completed")
         output_hash = sqlite_content_digest(output)
         final_counts: dict[str, dict[str, int]] = {}
         table_rows: dict[str, int] = {}
@@ -227,26 +255,41 @@ def execute_run(
             table_rows[checkpoint.table_name] = checkpoint.rows_done
             merge_counts(final_counts, checkpoint.counts)
         row_count = sum(table_rows.values())
-        _manifest, changed = write_manifest(
-            paths.manifest_dir, inventory, policy, run_id, output, output_hash,
-            row_count, transformer_map, final_counts,
-        )
-        return RunResult(
+        result = RunResult(
             run_id=run_id, dataset_path=inventory.path,
             dataset_fingerprint=inventory.fingerprint, policy_name=policy.name,
             policy_fingerprint=policy.fingerprint, output_path=output,
             output_hash=output_hash, row_count=row_count,
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
-            table_rows=table_rows, policy_changed=changed, dry_run=False,
+            table_rows=table_rows, policy_changed=False, dry_run=False,
         )
+        # The audit entry is the commit point of the run. If it cannot be
+        # written (e.g. the disk is full), the exception path below marks the
+        # run failed and discards the target database, so a completed run
+        # never exists without its audit record.
+        result.audit_entry = AuditLog(paths.audit_path).append(
+            build_audit_entry(result, transformer_map)
+        )
+        store.set_status(run_id, "completed")
+        _manifest, changed = write_manifest(
+            paths.manifest_dir, inventory, policy, run_id, output, output_hash,
+            row_count, transformer_map, final_counts,
+        )
+        result.policy_changed = changed
+        return result
     except PipelineInterrupted:
         if store is not None:
             store.set_status(run_id, "interrupted")
         raise
     except Exception:
         if store is not None:
-            store.set_status(run_id, "failed")
+            try:
+                store.set_status(run_id, "failed")
+            except Exception:
+                pass
+        if output is not None:
+            _discard_output(output)
         raise
     finally:
         if target is not None:

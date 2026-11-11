@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -223,8 +224,11 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](args)
-    except (MasklineError, PolicyError, PipelineError, PseudoMapError, FileNotFoundError) as exc:
+    except (MasklineError, PolicyError, PipelineError, PseudoMapError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        print(f"error: database operation failed: {exc}", file=sys.stderr)
         return 2
 
 

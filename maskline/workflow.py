@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .audit import AuditLog, build_audit_entry
 from .config import SecretStore
 from .dataset_io import discover_datasets
 from .detectors.engine import scan_inventory
@@ -72,7 +71,11 @@ def finalize_run(
     result: Any,
     findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """Write the run report and expose the artifacts of a finished run.
+
+    The audit entry was already appended inside ``execute_run`` as the run's
+    commit point; by the time this function runs, the run is durable and
+    audited, so only the (regenerable) report remains to be produced.
+    """
     report_paths = generate_report(paths, inventory, policy, result, findings)
-    entry = build_audit_entry(result, result.transformer_map)
-    audit_entry = AuditLog(paths.audit_path).append(entry)
-    return {"report": report_paths, "audit": audit_entry}
+    return {"report": report_paths, "audit": result.audit_entry}
