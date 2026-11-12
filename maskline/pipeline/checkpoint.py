@@ -20,9 +20,11 @@ class RunRecord:
     status: str
     started_at: str
     updated_at: str
+    correlation_id: str | None = None
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "RunRecord":
-        return cls(**{key: row[key] for key in row.keys()})
+        keys = row.keys()
+        return cls(**{key: row[key] for key in keys if key in cls.__dataclass_fields__})
 
 
 @dataclass(frozen=True)
@@ -40,8 +42,11 @@ class CheckpointStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
+        # Serialize concurrent writers from parallel processes safely.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -53,7 +58,8 @@ class CheckpointStore:
                 output_path TEXT NOT NULL,
                 status TEXT NOT NULL,
                 started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                correlation_id TEXT
             );
             CREATE TABLE IF NOT EXISTS checkpoints (
                 run_id TEXT NOT NULL,
@@ -66,7 +72,17 @@ class CheckpointStore:
             );
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after v0.1 without touching existing rows."""
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        if "correlation_id" not in columns:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN correlation_id TEXT")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_correlation ON runs(correlation_id)"
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -79,11 +95,15 @@ class CheckpointStore:
 
     def create_run(self, record: RunRecord) -> None:
         self.conn.execute(
-            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs "
+            "(run_id, dataset_path, dataset_fingerprint, policy_path, "
+            "policy_fingerprint, output_path, status, started_at, updated_at, "
+            "correlation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.run_id, record.dataset_path, record.dataset_fingerprint,
                 record.policy_path, record.policy_fingerprint, record.output_path,
                 record.status, record.started_at, record.updated_at,
+                record.correlation_id,
             ),
         )
         self.conn.commit()

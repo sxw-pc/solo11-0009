@@ -2,17 +2,42 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 class MasklineError(RuntimeError):
     """Base class for user-facing maskline errors."""
+
+
+@contextlib.contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    """Advisory exclusive lock backed by a sibling lock file.
+
+    Used to serialize append-only writers (the audit hash chain) across
+    threads and processes. The lock is purely advisory and never changes the
+    content or hashing of the protected file. On platforms without ``fcntl``
+    it degrades to a no-op; maskline targets local POSIX workspaces.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = path.with_name(path.name + ".lock")
+    with lock_file.open("a+", encoding="utf-8") as handle:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX fallback
+            yield
+            return
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def canonical_json(value: Any) -> str:

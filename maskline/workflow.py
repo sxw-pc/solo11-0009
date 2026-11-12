@@ -10,6 +10,7 @@ from .audit import AuditLog, build_audit_entry
 from .config import SecretStore
 from .dataset_io import discover_datasets
 from .detectors.engine import scan_inventory
+from .lineage import LineageStore, correlation_id
 from .policies import Policy
 from .registry import Catalog, DatasetInventory, inspect_dataset
 from .report import generate_report
@@ -73,6 +74,16 @@ def finalize_run(
     findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
     report_paths = generate_report(paths, inventory, policy, result, findings)
+    # Guarantee the correlation id even for RunResult subclasses/mocks that
+    # predate the field; it is always derivable from the dataset fingerprint.
+    corr_id = result.correlation_id or correlation_id(result.dataset_fingerprint)
+    if getattr(result, "correlation_id", None) is None:
+        result.correlation_id = corr_id
     entry = build_audit_entry(result, result.transformer_map)
     audit_entry = AuditLog(paths.audit_path).append(entry)
+    # Link the finalized chain position back into the cross-run lineage store.
+    with LineageStore(paths.lineage_db) as lineage:
+        lineage.attach_audit(
+            result.run_id, audit_entry["seq"], audit_entry["entry_hash"]
+        )
     return {"report": report_paths, "audit": audit_entry}

@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
+from .utils import (
+    MasklineError,
+    atomic_write_text,
+    canonical_json,
+    file_lock,
+    sha256_text,
+)
 
 GENESIS_HASH = "0" * 64
 
@@ -42,28 +48,32 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
-        previous_hash = GENESIS_HASH
-        sequence = 1
-        if self.path.exists() and self.path.stat().st_size > 0:
-            verification = self.verify()
-            entries = read_audit_entries(self.path)
-            previous_hash = verification.head_hash
-            sequence = len(entries) + 1
-        body = dict(entry)
-        body.pop("entry_hash", None)
-        body.pop("prev_hash", None)
-        body.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        body["seq"] = sequence
-        body["prev_hash"] = previous_hash
-        entry_hash = sha256_text(canonical_json(body))
-        stored = dict(body)
-        stored["entry_hash"] = entry_hash
-        with self.path.open("a", encoding="utf-8", newline="\n") as fh:
-            fh.write(canonical_json(stored) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        self._write_head(sequence, entry_hash)
-        return stored
+        # Serialize concurrent appenders (parallel masking runs in separate
+        # processes) so the verify-then-append sequence and the seq numbers
+        # stay consistent. The on-disk chain format is unchanged.
+        with file_lock(self.path):
+            previous_hash = GENESIS_HASH
+            sequence = 1
+            if self.path.exists() and self.path.stat().st_size > 0:
+                verification = self.verify()
+                entries = read_audit_entries(self.path)
+                previous_hash = verification.head_hash
+                sequence = len(entries) + 1
+            body = dict(entry)
+            body.pop("entry_hash", None)
+            body.pop("prev_hash", None)
+            body.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            body["seq"] = sequence
+            body["prev_hash"] = previous_hash
+            entry_hash = sha256_text(canonical_json(body))
+            stored = dict(body)
+            stored["entry_hash"] = entry_hash
+            with self.path.open("a", encoding="utf-8", newline="\n") as fh:
+                fh.write(canonical_json(stored) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._write_head(sequence, entry_hash)
+            return stored
 
     def verify(self) -> AuditVerification:
         return verify_audit(self.path)
@@ -140,11 +150,18 @@ def build_audit_entry(
     rule_columns: dict[str, dict[str, str]],
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Turn a RunResult plus applied columns into one audit record."""
+    """Turn a RunResult plus applied columns into one audit record.
+
+    New records carry a ``correlation_id`` linking every run of the same
+    source dataset. The field is hashed by the *existing* append/hash-chain
+    machinery exactly like every other field; no chain logic is changed and
+    legacy entries without the field remain valid.
+    """
     entry: dict[str, Any] = {
         "run_id": result.run_id,
         "dataset_path": str(result.dataset_path),
         "dataset_fingerprint": result.dataset_fingerprint,
+        "correlation_id": result.correlation_id,
         "policy_name": result.policy_name,
         "policy_fingerprint": result.policy_fingerprint,
         "columns": rule_columns,

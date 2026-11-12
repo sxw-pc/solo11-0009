@@ -46,6 +46,9 @@ class Paths:
     def checkpoint_db(self) -> Path:
         return self.data_dir / "checkpoints.sqlite"
     @property
+    def lineage_db(self) -> Path:
+        return self.data_dir / "lineage.sqlite"
+    @property
     def pseudomap_db(self) -> Path:
         return self.data_dir / "pseudomap.sqlite"
     @property

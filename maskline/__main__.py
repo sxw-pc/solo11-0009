@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .audit import AuditLog, read_audit_entries
+from .audit import read_audit_entries
 from .config import Paths, SecretStore
 from .detectors.engine import detect_inventory
+from .lineage import (
+    CorrelationIntegrityError,
+    LineageError,
+    trace_dataset,
+    verify_correlation_ids,
+)
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
 from .pipeline.runner import PipelineError, execute_run
@@ -57,6 +64,21 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    trace = sub.add_parser(
+        "trace",
+        parents=[common],
+        help="trace every masking run linked to one source dataset",
+    )
+    trace.add_argument("--dataset", default=None, help="source dataset file path")
+    trace.add_argument(
+        "--fingerprint", default=None,
+        help="dataset content fingerprint (alternative to --dataset)",
+    )
+    trace.add_argument(
+        "--correlation", default=None,
+        help="explicit correlation id (alternative to --dataset)",
+    )
+    trace.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     return parser
 
 
@@ -191,10 +213,17 @@ def _cmd_reveal(args: argparse.Namespace) -> int:
 def _cmd_audit(args: argparse.Namespace) -> int:
     paths = _paths(args)
     if args.verify:
-        verification = AuditLog(paths.audit_path).verify()
+        # One pass verifies the unchanged hash chain and the correlation ids;
+        # legacy entries without the field are derived on the fly, not rejected.
+        verification, records = verify_correlation_ids(paths.audit_path)
+        embedded = sum(1 for record in records if record["embedded"])
         print(
             f"audit chain OK: entries={verification.entries} "
             f"head={verification.head_hash}"
+        )
+        print(
+            f"correlation ids OK: checked={len(records)} embedded={embedded} "
+            f"derived={len(records) - embedded}"
         )
         return 0
     if not paths.audit_path.exists():
@@ -210,6 +239,71 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_trace(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    if not any((args.dataset, args.fingerprint, args.correlation)):
+        raise MasklineError(
+            "trace requires one of --dataset, --fingerprint or --correlation"
+        )
+    fingerprint = args.fingerprint
+    if args.dataset:
+        fingerprint = inspect_dataset(args.dataset).fingerprint
+    result = trace_dataset(
+        paths.audit_path,
+        lineage_path=paths.lineage_db,
+        dataset_fingerprint=fingerprint,
+        correlation=args.correlation,
+    )
+    if args.json:
+        payload = {
+            "correlation_id": result.correlation_id,
+            "dataset_fingerprint": result.dataset_fingerprint,
+            "policy_fingerprints": list(result.policy_fingerprints),
+            "run_count": len({event.run_id for event in result.events}),
+            "events": [
+                {
+                    "source": event.source,
+                    "seq": event.seq,
+                    "run_id": event.run_id,
+                    "status": event.status,
+                    "policy_fingerprint": event.policy_fingerprint,
+                    "policy_name": event.policy_name,
+                    "ts": event.ts,
+                    "rows_processed": event.rows_processed,
+                    "output_path": event.output_path,
+                    "output_hash": event.output_hash,
+                    "entry_hash": event.entry_hash,
+                    "correlation_id": event.correlation_id,
+                    "dataset_fingerprint": event.dataset_fingerprint,
+                }
+                for event in result.events
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print(f"correlation_id: {result.correlation_id}")
+    print(f"dataset_fingerprint: {result.dataset_fingerprint}")
+    print(f"policy versions: {len(result.policy_fingerprints)}")
+    for policy_fp in result.policy_fingerprints:
+        print(f"  - {policy_fp}")
+    run_ids = []
+    for event in result.events:
+        if event.run_id not in run_ids:
+            run_ids.append(event.run_id)
+    print(f"linked runs: {len(run_ids)}")
+    print("events (full link):")
+    for event in result.events:
+        seq = f"seq={event.seq}" if event.seq is not None else "seq=-"
+        print(
+            f"  [{event.source}] {seq} run={event.run_id} "
+            f"status={event.status or '-'} "
+            f"policy={(event.policy_fingerprint or '')[:16]}... "
+            f"rows={event.rows_processed if event.rows_processed is not None else '-'} "
+            f"ts={event.ts or '-'}"
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -220,10 +314,14 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
+        "trace": _cmd_trace,
     }
     try:
         return handlers[args.command](args)
-    except (MasklineError, PolicyError, PipelineError, PseudoMapError, FileNotFoundError) as exc:
+    except (
+        MasklineError, PolicyError, PipelineError, PseudoMapError,
+        LineageError, CorrelationIntegrityError, FileNotFoundError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

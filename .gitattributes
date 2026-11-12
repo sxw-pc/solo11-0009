@@ -1,0 +1,12 @@
+# Normalize line endings to LF in the repository for every text file, so
+# cross-platform checkouts never rewrite the whole working tree (which would
+# create spurious diffs and could perturb hash-chain fixtures).
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.toml text eol=lf
+Makefile text eol=lf

@@ -52,6 +52,7 @@ pytest -q
 - `data/out/demo.masked.sqlite`、`data/out/leads.masked.sqlite`：独立目标库
 - `data/pseudomap.sqlite`：假名映射库（等同密钥，请单独保管）
 - `data/checkpoints.sqlite`：运行与断点记录
+- `data/lineage.sqlite`：跨运行关联库（关联 ID、运行/策略版本与审计链指针）
 - `reports/<run_id>.md`、`reports/<run_id>.json`：报告
 - `audit/audit.jsonl` 与 `audit/audit.jsonl.head`：追加式审计链与锚点
 
@@ -104,6 +105,7 @@ maskline/
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
 │   ├── pseudomap.py         # 可逆假名映射
+│   ├── lineage.py           # 关联 ID 派生、跨运行 lineage 库与全链路追溯
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
 │   ├── workflow.py          # 扫描、收尾、审计的共享流程
@@ -178,8 +180,14 @@ python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 # 用映射库还原某个假名 token
 python -m maskline reveal --token psn_xxxxxxxx
 
-# 校验哈希链（含尾部截断锚点）
+# 校验哈希链（含尾部截断锚点）与关联 ID
 python -m maskline audit --verify
+
+# 追溯同一份源数据集的所有脱敏运行（三种入口任选其一）
+python -m maskline trace --dataset data/raw/demo.sqlite
+python -m maskline trace --fingerprint <数据集内容指纹>
+python -m maskline trace --correlation corr-xxxxxxxxxxxxxxxx
+# 加 --json 输出机器可读的全链路事件
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
@@ -190,6 +198,7 @@ python -m maskline audit --verify
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
+- **跨运行关联**：`correlation_id` 由数据集内容指纹经 SHA-256 确定性派生，同一源数据集的多次运行（含不同策略版本、中断续跑、并发任务）共享同一关联 ID。该 ID 写入新审计条目并在 `data/lineage.sqlite` 建立运行/策略/审计链指针；`trace` 子命令据此串起全链路事件。旧版审计链没有该字段也完全兼容，查询时按数据集指纹即时派生。
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。

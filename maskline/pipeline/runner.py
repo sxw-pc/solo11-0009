@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Paths, SecretStore
+from ..lineage import LineageStore, correlation_id
 from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
 from ..registry import DatasetInventory, TableInfo
@@ -45,6 +46,7 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    correlation_id: str | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -67,9 +69,11 @@ def _prepare_target(
     policy: Policy,
     paths: Paths,
     store: CheckpointStore,
+    lineage: LineageStore,
     run_id: str,
     resume_run_id: str | None,
     output_path: str | Path | None,
+    corr_id: str,
 ) -> Path:
     if resume_run_id:
         record = store.get_run(run_id)
@@ -81,10 +85,19 @@ def _prepare_target(
             raise PipelineError("dataset content changed since the interrupted run")
         if record.policy_fingerprint != policy.fingerprint:
             raise PipelineError("policy changed since the interrupted run")
+        # A resumed execution must keep the exact same correlation id. The id
+        # is deterministic from the dataset fingerprint, so any mismatch means
+        # the checkpoint metadata itself has been tampered with.
+        if record.correlation_id is not None and record.correlation_id != corr_id:
+            raise PipelineError(
+                "correlation id changed since the interrupted run; "
+                "checkpoint metadata may have been tampered with"
+            )
         output = Path(record.output_path)
         if not output.exists():
             raise PipelineError(f"target database is missing: {output}")
         store.set_status(run_id, "running")
+        lineage.set_status(run_id, "running")
         return output
     output = Path(output_path) if output_path else (
         paths.out_dir / f"{inventory.path.stem}.masked.sqlite"
@@ -97,8 +110,17 @@ def _prepare_target(
     store.create_run(
         RunRecord(
             run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
-            policy.fingerprint, str(output), "running", now, now,
+            policy.fingerprint, str(output), "running", now, now, corr_id,
         )
+    )
+    lineage.register_run(
+        run_id=run_id,
+        dataset_fingerprint=inventory.fingerprint,
+        policy_fingerprint=policy.fingerprint,
+        policy_name=policy.name,
+        status="running",
+        output_path=str(output),
+        started_at=now,
     )
     return output
 
@@ -161,15 +183,19 @@ def execute_run(
         raise PipelineError("dry-run cannot be combined with resume")
     started = time.monotonic()
     run_id = resume_run_id or new_run_id()
+    corr_id = correlation_id(inventory.fingerprint)
     store: CheckpointStore | None = None
+    lineage: LineageStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
             store = CheckpointStore(paths.checkpoint_db)
+            lineage = LineageStore(paths.lineage_db)
             output = _prepare_target(
-                inventory, policy, paths, store, run_id, resume_run_id, output_path
+                inventory, policy, paths, store, lineage, run_id,
+                resume_run_id, output_path, corr_id,
             )
             if _requires_secret(rule):
                 if secrets_store is None:
@@ -216,10 +242,11 @@ def execute_run(
                 elapsed_seconds=time.monotonic() - started,
                 transform_counts=dry_counts, transformer_map=transformer_map,
                 table_rows={table.name: table.row_count for table in inventory.tables},
-                policy_changed=False, dry_run=True,
+                policy_changed=False, dry_run=True, correlation_id=corr_id,
             )
-        assert store is not None and output is not None
+        assert store is not None and lineage is not None and output is not None
         store.set_status(run_id, "completed")
+        lineage.set_status(run_id, "completed")
         output_hash = sqlite_content_digest(output)
         final_counts: dict[str, dict[str, int]] = {}
         table_rows: dict[str, int] = {}
@@ -239,14 +266,19 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            correlation_id=corr_id,
         )
     except PipelineInterrupted:
         if store is not None:
             store.set_status(run_id, "interrupted")
+        if lineage is not None:
+            lineage.set_status(run_id, "interrupted")
         raise
     except Exception:
         if store is not None:
             store.set_status(run_id, "failed")
+        if lineage is not None:
+            lineage.set_status(run_id, "failed")
         raise
     finally:
         if target is not None:
@@ -255,3 +287,5 @@ def execute_run(
             mapping.close()
         if store is not None:
             store.close()
+        if lineage is not None:
+            lineage.close()

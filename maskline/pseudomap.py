@@ -31,8 +31,11 @@ class PseudoMap:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         elif not self.path.exists():
             raise PseudoMapError(f"pseudonym mapping database not found: {self.path}")
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
+        # Tolerate concurrent writers from parallel masking processes.
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS pseudonym_map (
