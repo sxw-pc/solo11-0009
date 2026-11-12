@@ -161,10 +161,48 @@ class Catalog:
                 tables_json TEXT NOT NULL,
                 registered_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS findings (
+            """
+        )
+        self._migrate_findings()
+        self.conn.commit()
+
+    def _migrate_findings(self) -> None:
+        """Add the json_path dimension; legacy column findings use '' path."""
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(findings)")
+        }
+        if not columns:
+            self.conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS findings (
+                    dataset_fingerprint TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    column_name TEXT NOT NULL,
+                    json_path TEXT NOT NULL DEFAULT '',
+                    sensitive_type TEXT,
+                    confidence TEXT NOT NULL DEFAULT 'none',
+                    score REAL NOT NULL DEFAULT 0,
+                    hit_rate REAL NOT NULL DEFAULT 0,
+                    validate_rate REAL NOT NULL DEFAULT 0,
+                    sample_size INTEGER NOT NULL DEFAULT 0,
+                    candidates_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (dataset_fingerprint, table_name, column_name, json_path)
+                );
+                """
+            )
+            return
+        if "json_path" in columns:
+            return
+        self.conn.executescript(
+            """
+            ALTER TABLE findings RENAME TO findings_legacy;
+            CREATE TABLE findings (
                 dataset_fingerprint TEXT NOT NULL,
                 table_name TEXT NOT NULL,
                 column_name TEXT NOT NULL,
+                json_path TEXT NOT NULL DEFAULT '',
                 sensitive_type TEXT,
                 confidence TEXT NOT NULL DEFAULT 'none',
                 score REAL NOT NULL DEFAULT 0,
@@ -173,11 +211,21 @@ class Catalog:
                 sample_size INTEGER NOT NULL DEFAULT 0,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY (dataset_fingerprint, table_name, column_name)
+                PRIMARY KEY (dataset_fingerprint, table_name, column_name, json_path)
             );
+            INSERT INTO findings (
+                dataset_fingerprint, table_name, column_name, json_path,
+                sensitive_type, confidence, score, hit_rate, validate_rate,
+                sample_size, candidates_json, updated_at
+            )
+            SELECT
+                dataset_fingerprint, table_name, column_name, '',
+                sensitive_type, confidence, score, hit_rate, validate_rate,
+                sample_size, candidates_json, updated_at
+            FROM findings_legacy;
+            DROP TABLE findings_legacy;
             """
         )
-        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -237,11 +285,12 @@ class Catalog:
         self.conn.execute(
             """
             INSERT INTO findings (
-                dataset_fingerprint, table_name, column_name, sensitive_type,
-                confidence, score, hit_rate, validate_rate, sample_size,
-                candidates_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(dataset_fingerprint, table_name, column_name) DO UPDATE SET
+                dataset_fingerprint, table_name, column_name, json_path,
+                sensitive_type, confidence, score, hit_rate, validate_rate,
+                sample_size, candidates_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dataset_fingerprint, table_name, column_name, json_path)
+            DO UPDATE SET
                 sensitive_type=excluded.sensitive_type,
                 confidence=excluded.confidence,
                 score=excluded.score,
@@ -255,6 +304,7 @@ class Catalog:
                 record["dataset_fingerprint"],
                 record["table_name"],
                 record["column_name"],
+                record.get("json_path", "") or "",
                 record.get("sensitive_type"),
                 record.get("confidence", "none"),
                 float(record.get("score", 0.0)),
@@ -270,7 +320,7 @@ class Catalog:
     def findings_for(self, fingerprint: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             "SELECT * FROM findings WHERE dataset_fingerprint = ? "
-            "ORDER BY table_name, column_name",
+            "ORDER BY table_name, column_name, json_path",
             (fingerprint,),
         ).fetchall()
         result = []

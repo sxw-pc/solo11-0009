@@ -37,6 +37,27 @@ datasets:
             params: { decimals: 0 }
           notes:
             transformer: nullify
+      profiles:
+        columns:
+          payload:
+            json:
+              max_depth: 32
+              max_bytes: 1048576
+              paths:
+                "$.profile.real_name":
+                  transformer: mask
+                  params: {keep_prefix: 1, keep_suffix: 0}
+                "$.profile.id_card":
+                  transformer: mask
+                  params: {keep_prefix: 2, keep_suffix: 2}
+                "$.profile.address":
+                  transformer: generalize
+                  params: {mode: address}
+                "$.items[*].phone":
+                  transformer: mask
+                  params: {keep_prefix: 3, keep_suffix: 4}
+              fallback:
+                transformer: nullify
       orders:
         columns:
           amount:

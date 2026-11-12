@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import random
 import sqlite3
 from datetime import date, timedelta
@@ -132,6 +133,50 @@ def _make_leads(rng: random.Random, count: int) -> list[tuple[Any, ...]]:
     return rows
 
 
+def _make_profile_doc(rng: random.Random, index: int) -> str:
+    """A nested JSON document with several sensitive leaves at distinct paths."""
+    birthday = date(1970, 1, 1) + timedelta(days=rng.randint(0, 15000))
+    document = {
+        "profile": {
+            "real_name": synthetic_name(rng),
+            "id_card": synthetic_id_card(rng, birthday),
+            "address": synthetic_address(rng),
+        },
+        "items": [
+            {
+                "sku": f"SKU-{index:03d}-{line}",
+                "phone": synthetic_phone(rng),
+                "remark": f"第{line}条配送备注",
+            }
+            for line in range(1, rng.randint(2, 3) + 1)
+        ],
+        "tags": ["vip", f"tier-{rng.randint(1, 3)}"],
+        "score": rng.randint(0, 100),
+    }
+    return json.dumps(document, ensure_ascii=False)
+
+
+def _make_profiles(rng: random.Random, count: int) -> list[tuple[Any, ...]]:
+    """JSON column with nested arrays plus dirty/oversized/over-deep cells."""
+    rows = []
+    # Five well-formed documents, then one of each non-fatal failure mode.
+    for index in range(1, min(count, 5) + 1):
+        rows.append(
+            (index, f"P-{index:04d}", _make_profile_doc(rng, index), rng.choice(STATUSES))
+        )
+    extras = [
+        # Not parseable: must degrade to the column fallback with a warning.
+        ("{broken json, not parseable", "broken"),
+        # Over the 1 MiB default document cap.
+        (json.dumps({"blob": "x" * ((1 << 20) + 16)}), "oversized"),
+        # Nesting deeper than the default depth cap (32).
+        ("[" * 40 + "1" + "]" * 40, "too_deep"),
+    ]
+    for offset, (payload, status) in enumerate(extras, start=len(rows) + 1):
+        rows.append((offset, f"P-{offset:04d}", payload, status))
+    return rows[:count]
+
+
 def generate_fixture(
     raw_dir: str | Path,
     seed: int = 20240513,
@@ -154,6 +199,7 @@ def generate_fixture(
     customer_rows = _make_customers(rng, customers)
     order_rows = _make_orders(rng, orders, customers)
     lead_rows = _make_leads(rng, leads)
+    profile_rows = _make_profiles(rng, 8)
     conn = sqlite3.connect(sqlite_path)
     try:
         conn.executescript(
@@ -182,10 +228,17 @@ def generate_fixture(
                 created_at TEXT NOT NULL,
                 status TEXT NOT NULL
             );
+            CREATE TABLE profiles (
+                profile_id INTEGER PRIMARY KEY,
+                profile_no TEXT NOT NULL,
+                payload TEXT,
+                status TEXT
+            );
             """
         )
         conn.executemany("INSERT INTO customers VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", customer_rows)
         conn.executemany("INSERT INTO orders VALUES (?,?,?,?,?,?,?,?)", order_rows)
+        conn.executemany("INSERT INTO profiles VALUES (?,?,?,?)", profile_rows)
         conn.commit()
     finally:
         conn.close()

@@ -84,12 +84,21 @@ def test_scan_persists_findings_and_registration_is_idempotent(workspace, invent
         assert catalog.register(inventory) is False
         findings = scan_inventory(inventory, catalog)
         stored = catalog.findings_for(inventory.fingerprint)
-        assert len(stored) == len(findings) == 20
+        assert len(stored) == len(findings)
+        # One column-level row per column, plus extra rows for JSON paths.
+        column_level = [item for item in stored if not item.get("json_path")]
+        assert len(column_level) == sum(len(table.columns) for table in inventory.tables)
         assert {item["column_name"] for item in stored} >= {"phone", "id_card"}
+        assert any(item.get("json_path") for item in stored)
         assert len(catalog.list_datasets()) == 1
 
 def test_detect_inventory_is_pure(workspace, inventories):
-    findings = detect_inventory(inventories["sqlite"])
-    assert len(findings) == 20
+    inventory = inventories["sqlite"]
+    findings = detect_inventory(inventory)
+    column_level = [item for item in findings if not item.get("json_path")]
+    assert len(column_level) == sum(
+        len(table.columns) for table in inventory.tables
+    )
+    assert any(item.get("json_path") for item in findings)
     with Catalog(workspace.meta_db) as catalog:
         assert catalog.findings_for(inventories["sqlite"].fingerprint) == []

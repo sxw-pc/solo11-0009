@@ -50,7 +50,7 @@ def findings_for(paths: Any, fingerprint: str) -> list[dict[str, Any]]:
 def needs_secret(policy: Policy, inventory: DatasetInventory) -> bool:
     rule = policy.validate_against(inventory)
     return any(
-        column.transformer in {"hash", "pseudonym"}
+        column.requires_secret()
         for table in rule.tables.values()
         for column in table.columns.values()
     )

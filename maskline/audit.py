@@ -154,6 +154,9 @@ def build_audit_entry(
         "output_hash": result.output_hash,
         "elapsed_seconds": round(result.elapsed_seconds, 6),
     }
+    json_state = getattr(result, "json_state", None)
+    if json_state:
+        entry["json_state"] = json_state
     if extra:
         entry.update(extra)
     return entry

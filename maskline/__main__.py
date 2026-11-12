@@ -74,8 +74,11 @@ def _print_scan(summaries: list[Any]) -> None:
         )
         for finding in summary.findings:
             if finding["confidence"] in {"high", "medium"}:
+                target = finding["column_name"]
+                if finding.get("json_path"):
+                    target = f"{target} {finding['json_path']}"
                 print(
-                    f"  ! {finding['table_name']}.{finding['column_name']} -> "
+                    f"  ! {finding['table_name']}.{target} -> "
                     f"{finding['sensitive_type']} "
                     f"({finding['confidence']}, score={finding['score']:.2f})"
                 )

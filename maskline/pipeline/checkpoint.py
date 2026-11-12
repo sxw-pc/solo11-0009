@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class TableCheckpoint:
     rows_done: int
     updated_at: str
     counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    json_state: dict[str, Any] = field(default_factory=dict)
 
 
 class CheckpointStore:
@@ -62,10 +64,18 @@ class CheckpointStore:
                 rows_done INTEGER NOT NULL,
                 updated_at TEXT NOT NULL,
                 counts_json TEXT NOT NULL DEFAULT '{}',
+                json_state_json TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY (run_id, table_name)
             );
             """
         )
+        checkpoint_cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(checkpoints)")
+        }
+        if checkpoint_cols and "json_state_json" not in checkpoint_cols:
+            self.conn.execute(
+                "ALTER TABLE checkpoints ADD COLUMN json_state_json TEXT NOT NULL DEFAULT '{}'"
+            )
         self.conn.commit()
 
     def close(self) -> None:
@@ -106,21 +116,25 @@ class CheckpointStore:
         last_rowid: int,
         rows_done: int,
         counts: dict[str, dict[str, int]] | None = None,
+        json_state: dict[str, Any] | None = None,
     ) -> None:
         now = _now()
         payload = json.dumps(counts or {}, sort_keys=True)
+        json_payload = json.dumps(json_state or {}, sort_keys=True, ensure_ascii=False)
         self.conn.execute(
             """
             INSERT INTO checkpoints
-                (run_id, table_name, last_rowid, rows_done, updated_at, counts_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (run_id, table_name, last_rowid, rows_done, updated_at,
+                 counts_json, json_state_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, table_name) DO UPDATE SET
                 last_rowid=excluded.last_rowid,
                 rows_done=excluded.rows_done,
                 updated_at=excluded.updated_at,
-                counts_json=excluded.counts_json
+                counts_json=excluded.counts_json,
+                json_state_json=excluded.json_state_json
             """,
-            (run_id, table_name, last_rowid, rows_done, now, payload),
+            (run_id, table_name, last_rowid, rows_done, now, payload, json_payload),
         )
         self.conn.execute("UPDATE runs SET updated_at = ? WHERE run_id = ?", (now, run_id))
         self.conn.commit()
@@ -153,6 +167,7 @@ def _checkpoint_from_row(row: sqlite3.Row) -> TableCheckpoint:
         rows_done=int(row["rows_done"]),
         updated_at=row["updated_at"],
         counts=json.loads(row["counts_json"] or "{}"),
+        json_state=json.loads(row["json_state_json"] or "{}"),
     )
 
 

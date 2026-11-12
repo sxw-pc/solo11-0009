@@ -35,12 +35,14 @@ class DetectionResult:
     hit_rate: float
     validate_rate: float
     candidates: tuple[Candidate, ...] = field(default_factory=tuple)
+    json_path: str = ""
 
     def to_record(self, dataset_fingerprint: str, table: str, column: str) -> dict[str, Any]:
         return {
             "dataset_fingerprint": dataset_fingerprint,
             "table_name": table,
             "column_name": column,
+            "json_path": self.json_path,
             "sensitive_type": self.sensitive_type,
             "confidence": self.confidence,
             "score": self.score,
@@ -124,8 +126,17 @@ def analyze_column(
 def detect_inventory(
     inventory: DatasetInventory, sample_limit: int = 200
 ) -> list[dict[str, Any]]:
-    """Score every column without writing anything (used by dry-run and scans)."""
+    """Score every column without writing anything (used by dry-run and scans).
+
+    Columns whose sampled cells are predominantly JSON containers get an
+    additional set of path-level findings (``json_path != ""``); the ordinary
+    whole-column finding is still emitted so legacy tooling keeps working.
+    """
     findings: list[dict[str, Any]] = []
+    # Imported lazily: json_.engine itself uses this module's analyze_values.
+    from ..json_ import JsonLimits, discover_json_paths, probe_json_column
+
+    limits = JsonLimits()
     for table in inventory.tables:
         for column in table.columns:
             samples = read_column_samples(
@@ -137,6 +148,18 @@ def detect_inventory(
             findings.append(
                 result.to_record(inventory.fingerprint, table.name, column.name)
             )
+            if probe_json_column(samples, limits):
+                findings.extend(
+                    discover_json_paths(
+                        samples,
+                        limits,
+                        sample_limit=sample_limit,
+                        table=table.name,
+                        column=column.name,
+                    )
+                )
+    for record in findings:
+        record["dataset_fingerprint"] = inventory.fingerprint
     return findings
 
 

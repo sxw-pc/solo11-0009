@@ -24,6 +24,11 @@ TRANSFORMER_LABELS = {
     "nullify": "置空",
     "round": "取整",
 }
+JSON_WARNING_LABELS = {
+    "not_json": "JSON 解析失败，已按整列降级",
+    "too_large": "文档超过体积上限，已按整列降级",
+    "too_deep": "嵌套超过深度上限，已按整列降级",
+}
 
 
 def _source_rows(inventory: DatasetInventory, table: TableInfo, limit: int) -> list[tuple[int, tuple[Any, ...]]]:
@@ -56,7 +61,9 @@ def _target_rows(output: Path, table: str, limit: int) -> dict[int, tuple[Any, .
 
 def _finding_map(findings: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     return {
-        (finding["table_name"], finding["column_name"]): finding for finding in findings
+        (finding["table_name"], finding["column_name"]): finding
+        for finding in findings
+        if not finding.get("json_path")
     }
 
 
@@ -137,8 +144,8 @@ def _markdown(
         "",
         "## 字段发现",
         "",
-        "| 表 | 列 | 建议类型 | 置信度 | 得分 | 命中率 | 校验通过率 | 已配置策略 |",
-        "|---|---|---|---|---:|---:|---:|---|",
+        "| 表 | 列 | JSON 路径 | 建议类型 | 置信度 | 得分 | 命中率 | 校验通过率 | 已配置策略 |",
+        "|---|---|---|---|---|---:|---:|---:|---|",
     ]
     for finding in findings:
         key = (finding["table_name"], finding["column_name"])
@@ -149,6 +156,7 @@ def _markdown(
         confidence = CONFIDENCE_LABELS.get(finding["confidence"], finding["confidence"])
         lines.append(
             f"| {_cell(finding['table_name'])} | {_cell(finding['column_name'])} | "
+            f"{_cell(finding.get('json_path') or '—')} | "
             f"{_cell(finding['sensitive_type'] or '—')} | {confidence} | "
             f"{finding['score']:.3f} | {finding['hit_rate']:.1%} | "
             f"{finding['validate_rate']:.1%} | {configured} |"
@@ -164,10 +172,16 @@ def _markdown(
     )
     for (table, column), detail in applied.items():
         params = json.dumps(detail.params, ensure_ascii=False, sort_keys=True)
+        if detail.transformer:
+            transformer_label = (
+                f"{TRANSFORMER_LABELS.get(detail.transformer, detail.transformer)} "
+                f"(`{detail.transformer}`)"
+            )
+        else:
+            transformer_label = "JSON 路径规则（无整列转换器）"
         lines.append(
             f"| {_cell(table)} | {_cell(column)} | "
-            f"{TRANSFORMER_LABELS.get(detail.transformer, detail.transformer)} "
-            f"(`{detail.transformer}`) | `{_cell(params)}` |"
+            f"{transformer_label} | `{_cell(params)}` |"
         )
     lines.extend(
         [
@@ -184,6 +198,59 @@ def _markdown(
             f"{counts.get('seen', 0)} | {counts.get('processed', 0)} | "
             f"{counts.get('changed', 0)} |"
         )
+    json_state = getattr(result, "json_state", None) or {}
+    json_columns = json_state.get("columns", {})
+    if json_columns:
+        lines.extend(
+            [
+                "",
+                "## JSON 路径处理统计",
+                "",
+                "| 列 | JSON 路径 | 转换器 | 见到叶子 | 非空处理 | 发生改变 |",
+                "|---|---|---|---:|---:|---:|",
+            ]
+        )
+        for column in sorted(json_columns):
+            for path, entries in sorted(
+                json_columns[column].get("path_stats", {}).items()
+            ):
+                for transformer, counts in sorted(entries.items()):
+                    lines.append(
+                        f"| {_cell(column)} | `{_cell(path)}` | "
+                        f"{TRANSFORMER_LABELS.get(transformer, transformer)} "
+                        f"(`{transformer}`) | {counts.get('seen', 0)} | "
+                        f"{counts.get('processed', 0)} | {counts.get('changed', 0)} |"
+                    )
+        lines.extend(["", "## JSON 降级警告", ""])
+        warning_rows = []
+        for column in sorted(json_columns):
+            state = json_columns[column]
+            for reason, count in sorted(state.get("warnings", {}).items()):
+                rowid_samples = state.get("warning_samples", {}).get(reason, [])
+                warning_rows.append(
+                    (
+                        column,
+                        JSON_WARNING_LABELS.get(reason, reason),
+                        count,
+                        ", ".join(str(item) for item in rowid_samples),
+                    )
+                )
+        if warning_rows:
+            lines.extend(
+                ["| 列 | 原因 | 行数 | rowid 样本（前 10 条）|", "|---|---|---:|---|"]
+            )
+            for column, label, count, sample_text in warning_rows:
+                lines.append(
+                    f"| {_cell(column)} | {_cell(label)} | {count} | "
+                    f"{_cell(sample_text or '—')} |"
+                )
+            lines.append("")
+            lines.append(
+                "> 降级单元格未做路径级变换：配置了 fallback 的列已按整列转换器处理，"
+                "其余保留原值，请人工复核。"
+            )
+        else:
+            lines.append("无。所有声明为 JSON 的单元格均成功解析并按路径处理。")
     lines.extend(["", "## 抽样前后对比", ""])
     for table in inventory.tables:
         rows = samples.get(table.name, [])
@@ -244,6 +311,10 @@ def generate_report(
     }
     warnings = []
     for finding in findings:
+        if finding.get("json_path"):
+            # Path-level findings are inside a declared JSON column, not
+            # standalone unmasked columns, so they never raise column warnings.
+            continue
         table_policy = rule.tables.get(finding["table_name"])
         configured = bool(
             table_policy and finding["column_name"] in table_policy.columns
@@ -265,6 +336,7 @@ def generate_report(
         },
         "applied_policy": rule.to_dict(),
         "transform_counts": result.transform_counts,
+        "json_state": getattr(result, "json_state", {}) or {},
         "findings": findings,
         "samples": samples,
         "warnings": warnings,

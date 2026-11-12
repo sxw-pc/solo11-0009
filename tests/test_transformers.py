@@ -25,6 +25,12 @@ def test_mask_keeps_edges_and_is_deterministic():
     assert run("mask", None) is None
     assert run("mask", "") == ""
 
+def test_mask_zero_suffix_does_not_leak_the_whole_string():
+    # text[-0:] is the whole string; an explicit zero suffix must keep nothing.
+    assert run("mask", "123456789", {"keep_prefix": 1, "keep_suffix": 0}) == "1********"
+    assert run("mask", "123456789", {"keep_prefix": 0, "keep_suffix": 0}) == "*" * 9
+    assert run("mask", "ab", {"keep_prefix": 0, "keep_suffix": 1}) == "*b"
+
 def test_hash_is_keyed_deterministic_and_null_safe(secret_store):
     context = TransformContext(secrets=secret_store)
     first = run("hash", "12345678901", {}, context)

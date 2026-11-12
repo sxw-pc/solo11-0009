@@ -26,4 +26,5 @@ class MaskTransformer:
         char = params["mask_char"]
         if prefix + suffix >= len(text):
             return char * len(text)
-        return text[:prefix] + char * (len(text) - prefix - suffix) + text[-suffix:]
+        kept_suffix = text[-suffix:] if suffix else ""
+        return text[:prefix] + char * (len(text) - prefix - suffix) + kept_suffix

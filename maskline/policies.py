@@ -10,6 +10,14 @@ from typing import Any, Mapping
 
 import yaml
 
+from .json_ import (
+    HARD_MAX_BYTES,
+    HARD_MAX_DEPTH,
+    JsonLimits,
+    JsonPathError,
+    PathRule,
+    build_path_rules,
+)
 from .registry import DatasetInventory
 from .transformers import REGISTRY, TransformError
 from .utils import MasklineError, canonical_json
@@ -21,11 +29,56 @@ class PolicyError(MasklineError):
 
 @dataclass(frozen=True)
 class ColumnPolicy:
+    # Empty transformer means a JSON-paths-only column: cells are handled by
+    # the json_config path rules and its fallback, never a column transformer.
     transformer: str
     params: dict[str, Any] = field(default_factory=dict)
+    json_config: "JsonColumnConfig | None" = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"transformer": self.transformer, "params": dict(self.params)}
+        payload: dict[str, Any] = {"params": dict(self.params)}
+        if self.transformer:
+            payload["transformer"] = self.transformer
+        if self.json_config is not None:
+            payload["json"] = self.json_config.to_dict()
+        return payload
+
+    def requires_secret(self) -> bool:
+        names = {self.transformer} if self.transformer else set()
+        if self.json_config is not None:
+            names.update(rule.transformer for rule in self.json_config.path_rules)
+            if self.json_config.fallback_transformer:
+                names.add(self.json_config.fallback_transformer)
+        return bool(names & {"hash", "pseudonym"})
+
+
+@dataclass(frozen=True)
+class JsonColumnConfig:
+    """Path-level masking plan for one JSON-declared column."""
+
+    path_rules: tuple[PathRule, ...]
+    limits: JsonLimits
+    fallback_transformer: str | None = None
+    fallback_params: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "paths": {
+                rule.canonical: {
+                    "transformer": rule.transformer,
+                    "params": dict(rule.params),
+                }
+                for rule in self.path_rules
+            },
+            "max_depth": self.limits.max_depth,
+            "max_bytes": self.limits.max_bytes,
+        }
+        if self.fallback_transformer is not None:
+            payload["fallback"] = {
+                "transformer": self.fallback_transformer,
+                "params": dict(self.fallback_params),
+            }
+        return payload
 
 
 @dataclass(frozen=True)
@@ -133,23 +186,107 @@ def _parse_column(name: str | int, raw: Any, where: str) -> tuple[str, ColumnPol
         raise PolicyError(f"{where}: column names must be non-empty strings")
     if isinstance(raw, str):
         transformer, params = raw, {}
-    else:
-        config = _expect_mapping(raw, where)
-        unknown = set(config) - {"transformer", "params"}
-        if unknown:
-            raise PolicyError(f"{where}: unknown keys: {', '.join(sorted(unknown))}")
-        if "transformer" not in config:
+        try:
+            resolved = REGISTRY.validate_params(transformer, params)
+        except TransformError as exc:
+            raise PolicyError(f"{where}: {exc}") from exc
+        return name, ColumnPolicy(transformer, resolved)
+    config = _expect_mapping(raw, where)
+    unknown = set(config) - {"transformer", "params", "json"}
+    if unknown:
+        raise PolicyError(f"{where}: unknown keys: {', '.join(sorted(unknown))}")
+    json_config = None
+    if "json" in config and config["json"] is not None:
+        json_config = _parse_json_config(
+            _expect_mapping(config["json"], f"{where}.json"), where
+        )
+    if "transformer" not in config:
+        if json_config is None:
             raise PolicyError(f"{where}: missing required key 'transformer'")
+        transformer = ""
+    else:
         transformer = config["transformer"]
-        params = config.get("params", {})
         if not isinstance(transformer, str) or not transformer:
             raise PolicyError(f"{where}: transformer must be a non-empty string")
-        params = _expect_mapping(params, f"{where}.params")
+    params = _expect_mapping(config.get("params", {}), f"{where}.params")
+    resolved: dict[str, Any] = {}
+    if transformer:
+        try:
+            resolved = REGISTRY.validate_params(transformer, params)
+        except TransformError as exc:
+            raise PolicyError(f"{where}: {exc}") from exc
+    elif params:
+        raise PolicyError(
+            f"{where}: column-level params need a column-level transformer"
+        )
+    return name, ColumnPolicy(transformer, resolved, json_config)
+
+
+def _parse_json_config(config: Mapping[str, Any], where: str) -> JsonColumnConfig:
+    allowed = {"paths", "fallback", "max_depth", "max_bytes"}
+    unknown = set(config) - allowed
+    if unknown:
+        raise PolicyError(
+            f"{where}.json: unknown keys: {', '.join(sorted(unknown))}"
+        )
+    raw_paths = config.get("paths")
+    if not isinstance(raw_paths, Mapping) or not raw_paths:
+        raise PolicyError(f"{where}.json.paths must be a non-empty mapping")
     try:
-        resolved = REGISTRY.validate_params(transformer, params)
-    except TransformError as exc:
-        raise PolicyError(f"{where}: {exc}") from exc
-    return name, ColumnPolicy(transformer, resolved)
+        path_rules = build_path_rules(raw_paths, where)
+    except (ValueError, JsonPathError) as exc:
+        raise PolicyError(str(exc)) from exc
+    max_depth = config.get("max_depth")
+    max_bytes = config.get("max_bytes")
+    if max_depth is not None and (isinstance(max_depth, bool) or not isinstance(max_depth, int)):
+        raise PolicyError(f"{where}.json.max_depth must be an integer")
+    if max_bytes is not None and (isinstance(max_bytes, bool) or not isinstance(max_bytes, int)):
+        raise PolicyError(f"{where}.json.max_bytes must be an integer")
+    try:
+        limits = JsonLimits.from_policy(max_depth, max_bytes)
+    except ValueError as exc:
+        raise PolicyError(f"{where}.json: {exc}") from exc
+    fallback_transformer: str | None = None
+    fallback_params: dict[str, Any] = {}
+    raw_fallback = config.get("fallback")
+    if raw_fallback is not None:
+        if isinstance(raw_fallback, str):
+            fallback_transformer = raw_fallback
+        elif isinstance(raw_fallback, Mapping):
+            bad = set(raw_fallback) - {"transformer", "params"}
+            if bad:
+                raise PolicyError(
+                    f"{where}.json.fallback: unknown keys: {', '.join(sorted(bad))}"
+                )
+            fallback_transformer = raw_fallback.get("transformer")
+            if not isinstance(fallback_transformer, str) or not fallback_transformer:
+                raise PolicyError(
+                    f"{where}.json.fallback.transformer must be a non-empty string"
+                )
+            raw_fb_params = raw_fallback.get("params", {})
+            if not isinstance(raw_fb_params, Mapping):
+                raise PolicyError(f"{where}.json.fallback.params must be a mapping")
+            fallback_params = dict(raw_fb_params)
+        else:
+            raise PolicyError(
+                f"{where}.json.fallback must be a transformer name or mapping"
+            )
+        try:
+            fallback_params = REGISTRY.validate_params(
+                fallback_transformer, fallback_params
+            )
+        except TransformError as exc:
+            raise PolicyError(f"{where}.json.fallback: {exc}") from exc
+    if max_depth is not None and not 1 <= max_depth <= HARD_MAX_DEPTH:
+        raise PolicyError(f"{where}.json.max_depth out of supported range")
+    if max_bytes is not None and not 1 <= max_bytes <= HARD_MAX_BYTES:
+        raise PolicyError(f"{where}.json.max_bytes out of supported range")
+    return JsonColumnConfig(
+        path_rules=path_rules,
+        limits=limits,
+        fallback_transformer=fallback_transformer,
+        fallback_params=fallback_params,
+    )
 
 
 def _parse_policy(data: Any, source_path: Path) -> Policy:

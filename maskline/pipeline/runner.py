@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Paths, SecretStore
+from ..json_ import JsonRunState
 from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
 from ..registry import DatasetInventory, TableInfo
@@ -45,18 +46,23 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    json_state: dict[str, Any] = field(default_factory=dict)
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
     return {
-        table_name: {name: col.transformer for name, col in table_policy.columns.items()}
+        table_name: {
+            name: col.transformer
+            for name, col in table_policy.columns.items()
+            if col.transformer
+        }
         for table_name, table_policy in rule.tables.items()
     }
 
 
 def _requires_secret(rule: DatasetRule) -> bool:
     return any(
-        detail.transformer in {"pseudonym", "hash"}
+        detail.requires_secret()
         for table_policy in rule.tables.values()
         for detail in table_policy.columns.values()
     )
@@ -116,13 +122,20 @@ def _process_table(
     batch_size: int,
     batch_counter: list[int],
     interrupt_after_batches: int | None,
+    json_state: JsonRunState | None,
 ) -> tuple[int, int, dict[str, dict[str, int]]]:
     after = checkpoint.last_rowid if checkpoint else 0
     rows_done = checkpoint.rows_done if checkpoint else 0
     table_counts = copy.deepcopy(checkpoint.counts) if checkpoint else {}
     for batch in source_batches(inventory, table, after, batch_size):
         transformed = [
-            (rowid, transform_row(values, table, table_policy, context, table_counts))
+            (
+                rowid,
+                transform_row(
+                    values, table, table_policy, context, table_counts,
+                    json_state=json_state, rowid=rowid,
+                ),
+            )
             for rowid, values in batch
         ]
         if target is not None:
@@ -134,11 +147,17 @@ def _process_table(
         after = transformed[-1][0]
         batch_counter[0] += 1
         if store is not None:
-            store.save_checkpoint(run_id, table.name, after, rows_done, table_counts)
+            store.save_checkpoint(
+                run_id, table.name, after, rows_done, table_counts,
+                json_state=json_state.to_dict() if json_state is not None else None,
+            )
         if interrupt_after_batches is not None and batch_counter[0] >= interrupt_after_batches:
             raise PipelineInterrupted(run_id)
     if store is not None and checkpoint is None:
-        store.save_checkpoint(run_id, table.name, after, rows_done, table_counts)
+        store.save_checkpoint(
+            run_id, table.name, after, rows_done, table_counts,
+            json_state=json_state.to_dict() if json_state is not None else None,
+        )
     return after, rows_done, table_counts
 
 
@@ -188,12 +207,15 @@ def execute_run(
         transformer_map = _transformer_map(rule)
         dry_counts: dict[str, dict[str, int]] = {}
         batch_counter = [0]
+        json_state = JsonRunState()
         for table in inventory.tables:
             checkpoint = store.get_checkpoint(run_id, table.name) if store else None
+            if checkpoint is not None and checkpoint.json_state:
+                json_state = JsonRunState.from_dict(checkpoint.json_state)
             _after, _rows, table_counts = _process_table(
                 inventory, table, rule.tables.get(table.name), checkpoint, target,
                 store, context, mapping, run_id, batch_size, batch_counter,
-                interrupt_after_batches,
+                interrupt_after_batches, json_state,
             )
             if dry_run:
                 merge_counts(dry_counts, table_counts)
@@ -204,6 +226,8 @@ def execute_run(
         if dry_run:
             for table_policy in rule.tables.values():
                 for detail in table_policy.columns.values():
+                    if not detail.transformer:
+                        continue
                     dry_counts.setdefault(
                         detail.transformer,
                         {"seen": 0, "processed": 0, "changed": 0},
@@ -217,6 +241,7 @@ def execute_run(
                 transform_counts=dry_counts, transformer_map=transformer_map,
                 table_rows={table.name: table.row_count for table in inventory.tables},
                 policy_changed=False, dry_run=True,
+                json_state=json_state.to_dict(),
             )
         assert store is not None and output is not None
         store.set_status(run_id, "completed")
@@ -227,6 +252,18 @@ def execute_run(
             table_rows[checkpoint.table_name] = checkpoint.rows_done
             merge_counts(final_counts, checkpoint.counts)
         row_count = sum(table_rows.values())
+        final_json_state = JsonRunState()
+        # Checkpoints carry the cumulative run-wide state, so later tables
+        # already include earlier ones; take each table's column snapshot once.
+        seen_columns: set[str] = set()
+        for checkpoint in store.list_checkpoints(run_id):
+            if checkpoint.json_state:
+                for name, column_state in JsonRunState.from_dict(
+                    checkpoint.json_state
+                ).columns.items():
+                    if name not in seen_columns:
+                        final_json_state.columns[name] = column_state
+                        seen_columns.add(name)
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
             row_count, transformer_map, final_counts,
@@ -239,6 +276,7 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            json_state=final_json_state.to_dict(),
         )
     except PipelineInterrupted:
         if store is not None:

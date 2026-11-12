@@ -28,9 +28,10 @@ def test_end_to_end_pipeline_preserves_non_sensitive_columns(
         secrets_store=secret_store, batch_size=2,
     )
     assert sqlite_content_digest(source) == source_hash
-    assert result.output_path.exists() and result.row_count == 15
+    assert result.output_path.exists() and result.row_count == 23
     assert rows(result.output_path, "SELECT COUNT(*) FROM customers")[0][0] == 6
     assert rows(result.output_path, "SELECT COUNT(*) FROM orders")[0][0] == 9
+    assert rows(result.output_path, "SELECT COUNT(*) FROM profiles")[0][0] == 8
     assert rows(result.output_path, "SELECT customer_id, status FROM customers ORDER BY 1") == rows(
         source, "SELECT customer_id, status FROM customers ORDER BY 1"
     )

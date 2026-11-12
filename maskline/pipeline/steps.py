@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ..dataset_io import iter_csv_tuples, iter_table_rows, sqlite_schema_sql
+from ..json_ import JsonRunState, transform_json_cell
 from ..registry import DatasetInventory, TableInfo
 from ..transformers import REGISTRY, TransformContext
 from ..utils import quote_ident
@@ -92,6 +93,8 @@ def transform_row(
     table_policy: Any,
     context: TransformContext,
     table_counts: dict[str, dict[str, int]],
+    json_state: JsonRunState | None = None,
+    rowid: int | None = None,
 ) -> tuple[Any, ...]:
     if table_policy is None:
         return row
@@ -100,6 +103,32 @@ def transform_row(
         policy = table_policy.columns.get(column.name)
         if policy is None:
             output.append(value)
+            continue
+        if policy.json_config is not None and json_state is not None:
+            json_config = policy.json_config
+            transformed, _outcome = transform_json_cell(
+                value,
+                json_config.path_rules,
+                json_config.fallback_transformer,
+                json_config.fallback_params,
+                json_config.limits,
+                context,
+                json_state.for_column(column.name),
+                rowid,
+                table.name,
+                column.name,
+            )
+            if policy.transformer:
+                # Column-level transformer counts still describe whole-column scope.
+                counts = table_counts.setdefault(
+                    policy.transformer, {"seen": 0, "processed": 0, "changed": 0}
+                )
+                counts["seen"] += 1
+                if value is not None and value != "":
+                    counts["processed"] += 1
+                if transformed != value:
+                    counts["changed"] += 1
+            output.append(transformed)
             continue
         counts = table_counts.setdefault(
             policy.transformer, {"seen": 0, "processed": 0, "changed": 0}
