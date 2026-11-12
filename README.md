@@ -19,6 +19,7 @@
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
 - Markdown / JSON 脱敏报告生成器
+- 产物留存生命周期：到期宽限、二次确认、可证明销毁
 
 **不是：**
 
@@ -52,8 +53,10 @@ pytest -q
 - `data/out/demo.masked.sqlite`、`data/out/leads.masked.sqlite`：独立目标库
 - `data/pseudomap.sqlite`：假名映射库（等同密钥，请单独保管）
 - `data/checkpoints.sqlite`：运行与断点记录
+- `data/lifecycle.sqlite`：产物留存台账与销毁批次进度
 - `reports/<run_id>.md`、`reports/<run_id>.json`：报告
 - `audit/audit.jsonl` 与 `audit/audit.jsonl.head`：追加式审计链与锚点
+- `audit/certificates/<dst-...>.json`：销毁凭证（含链头哈希与逐项证据）
 
 ## 架构
 
@@ -104,6 +107,8 @@ maskline/
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
 │   ├── pseudomap.py         # 可逆假名映射
+│   ├── lifecycle/           # 留存策略、宽限状态机、安全抹除、销毁凭证
+│   ├── lifecycle_cli.py     # lifecycle 子命令
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
 │   ├── workflow.py          # 扫描、收尾、审计的共享流程
@@ -180,7 +185,15 @@ python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
+
+# 产物生命周期：预览到期、安排宽限、撤销、确认销毁
+python -m maskline lifecycle preview
+python -m maskline lifecycle schedule
+python -m maskline lifecycle revoke --artifact-id art-xxxx
+python -m maskline lifecycle destroy --token art-xxxx=dtk-yyyy
 ```
+
+生命周期的留存规则、宽限期、二次确认与销毁凭证见 [docs/lifecycle.md](docs/lifecycle.md)。
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
 

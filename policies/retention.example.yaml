@@ -1,0 +1,22 @@
+# 留存策略示例：全局默认 + 单个数据集覆盖。
+# 用法：maskline lifecycle preview --retention-policy policies/retention.example.yaml
+# 天数均为 >= 0 的整数；grace_days 是到期后可撤销的宽限窗口。
+
+# 全局宽限期（天），默认 7
+grace_days: 7
+
+# 全局每类产物留存天数；未列出的类型沿用内置默认
+retention_days:
+  pseudomap: 30      # 假名映射 = 明文钥匙，默认最短
+  output: 90
+  checkpoint: 14     # 仅在可能续跑期间有用
+  report: 180
+  manifest: 180
+
+# 按数据集指纹覆盖（这里用占位指纹，替换成真实指纹）
+datasets:
+  "0000000000000000":
+    grace_days: 2
+    retention_days:
+      pseudomap: 3
+      output: 30

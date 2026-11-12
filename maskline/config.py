@@ -49,6 +49,9 @@ class Paths:
     def pseudomap_db(self) -> Path:
         return self.data_dir / "pseudomap.sqlite"
     @property
+    def lifecycle_db(self) -> Path:
+        return self.data_dir / "lifecycle.sqlite"
+    @property
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
     @property
@@ -57,6 +60,9 @@ class Paths:
     @property
     def reports_dir(self) -> Path:
         return self.root / "reports"
+    @property
+    def certificates_dir(self) -> Path:
+        return self.root / "audit" / "certificates"
 
     def ensure_runtime_dirs(self) -> None:
         for directory in (
@@ -66,6 +72,7 @@ class Paths:
             self.manifest_dir,
             self.audit_path.parent,
             self.reports_dir,
+            self.certificates_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

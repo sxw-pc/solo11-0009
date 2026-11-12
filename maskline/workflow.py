@@ -71,8 +71,17 @@ def finalize_run(
     policy: Policy,
     result: Any,
     findings: list[dict[str, Any]],
+    retention_policy: Any = None,
+    clock: Any = None,
 ) -> dict[str, Any]:
     report_paths = generate_report(paths, inventory, policy, result, findings)
     entry = build_audit_entry(result, result.transformer_map)
     audit_entry = AuditLog(paths.audit_path).append(entry)
+    from .lifecycle.manager import LifecycleManager
+    from .lifecycle.retention import RetentionPolicy
+
+    with LifecycleManager(
+        paths, retention_policy or RetentionPolicy.default(), clock=clock
+    ) as lifecycle:
+        lifecycle.register_run_artifacts(result)
     return {"report": report_paths, "audit": audit_entry}

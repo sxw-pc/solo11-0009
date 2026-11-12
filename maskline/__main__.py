@@ -54,6 +54,38 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--sample-limit", type=int, default=200)
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
+    lifecycle = sub.add_parser(
+        "lifecycle", parents=[common],
+        help="artifact retention, grace-period destruction and evidence",
+    )
+    lifecycle.add_argument(
+        "--retention-policy", default=None,
+        help="YAML file with retention defaults and per-dataset overrides",
+    )
+    lifecycle_sub = lifecycle.add_subparsers(dest="lifecycle_command", required=True)
+    lc_preview = lifecycle_sub.add_parser(
+        "preview", help="preview due / in-grace / expired / blocked artifacts (read-only)"
+    )
+    lc_preview.add_argument("--json", action="store_true")
+    lc_schedule = lifecycle_sub.add_parser(
+        "schedule", help="move retention-expired artifacts into the revocable grace window"
+    )
+    lc_schedule.add_argument("--json", action="store_true")
+    lc_revoke = lifecycle_sub.add_parser(
+        "revoke", help="cancel a pending destruction inside the grace window"
+    )
+    lc_revoke.add_argument("--artifact-id", required=True)
+    lc_destroy = lifecycle_sub.add_parser(
+        "destroy", help="erase grace-expired items (pseudomap needs its token)"
+    )
+    lc_destroy.add_argument("--destruction-id", default=None)
+    lc_destroy.add_argument(
+        "--token", action="append", default=[],
+        help="pseudomap confirmation as artifact_id=destroy_token (repeatable)",
+    )
+    lc_list = lifecycle_sub.add_parser("list", help="list every registered artifact")
+    lc_list.add_argument("--json", action="store_true")
+    lifecycle_sub.add_parser("batches", help="list destruction batches and their progress")
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
@@ -213,6 +245,9 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "lifecycle":
+        from .lifecycle_cli import handle_lifecycle
+        return handle_lifecycle(args)
     handlers = {
         "demo": _cmd_demo,
         "scan": _cmd_scan,
