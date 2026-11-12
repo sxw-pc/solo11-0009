@@ -11,13 +11,14 @@ from . import __version__
 from .audit import AuditLog, read_audit_entries
 from .config import Paths, SecretStore
 from .detectors.engine import detect_inventory
+from .evaluate import EvalParams, evaluate, parse_join_spec, parse_qi_spec
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
 from .pipeline.runner import PipelineError, execute_run
 from .pseudomap import PseudoMap, PseudoMapError
 from .registry import inspect_dataset
 from .utils import MasklineError
-from .workflow import finalize_run, needs_secret, scan_paths
+from .workflow import finalize_evaluation, finalize_run, needs_secret, scan_paths
 
 
 def _common() -> argparse.ArgumentParser:
@@ -57,6 +58,31 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    evaluate_cmd = sub.add_parser(
+        "evaluate",
+        parents=[common],
+        help="evaluate a masked product against its source (read-only)",
+    )
+    evaluate_cmd.add_argument("--source", required=True, help="source dataset (SQLite or CSV)")
+    evaluate_cmd.add_argument("--product", required=True, help="masked product (SQLite)")
+    evaluate_cmd.add_argument(
+        "--qi",
+        action="append",
+        default=[],
+        metavar="TABLE:COL[,COL...]",
+        help="quasi-identifier column set evaluated on the product; repeatable",
+    )
+    evaluate_cmd.add_argument(
+        "--join",
+        action="append",
+        default=[],
+        metavar="CHILD.COL=PARENT.COL",
+        help="foreign-key pair for join preservation; repeatable",
+    )
+    evaluate_cmd.add_argument("--numeric-buckets", type=int, default=10)
+    evaluate_cmd.add_argument("--min-bucket-size", type=int, default=5)
+    evaluate_cmd.add_argument("--categorical-max-distinct", type=int, default=50)
+    evaluate_cmd.add_argument("--distinct-cap", type=int, default=500000)
     return parser
 
 
@@ -188,6 +214,54 @@ def _cmd_reveal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    paths.ensure_runtime_dirs()
+    params = EvalParams(
+        numeric_buckets=args.numeric_buckets,
+        min_bucket_size=args.min_bucket_size,
+        categorical_max_distinct=args.categorical_max_distinct,
+        distinct_cap=args.distinct_cap,
+        qi_sets=tuple(parse_qi_spec(text) for text in args.qi),
+        joins=tuple(parse_join_spec(text) for text in args.join),
+    )
+    report = evaluate(args.source, args.product, params, paths)
+    artifacts = finalize_evaluation(paths, report)
+    summary = report["summary"]
+    counts = summary["status_counts"]
+    print(
+        f"evaluation={report['evaluation_id']} tables={summary['tables']} "
+        f"columns={summary['columns']} elapsed={report['elapsed_seconds']:.3f}s"
+    )
+    print(
+        f"utility: preserved={counts['preserved']} degraded={counts['degraded']} "
+        f"lost={counts['lost']} empty={counts['empty']}"
+    )
+    for join in report["joins"]:
+        rate = join["product"]["preservation_rate"]
+        rate_text = "n/a" if rate is None else f"{rate:.4f}"
+        print(
+            f"  join {join['child_table']}.{join['child_column']} -> "
+            f"{join['parent_table']}.{join['parent_column']}: "
+            f"product_preservation={rate_text} "
+            f"orphans={join['product']['orphan_rows']}"
+        )
+    for risk in report["risks"]:
+        ratio = risk["uniqueness_ratio"]
+        ratio_text = "n/a" if ratio is None else f"{ratio:.4f}"
+        print(
+            f"  qi {risk['table']}({'+'.join(risk['columns'])}): "
+            f"classes={risk['classes']} min_class={risk['min_class_size']} "
+            f"uniqueness={ratio_text}"
+        )
+    for warning in report["warnings"]:
+        print(f"  warning: {warning}")
+    print(f"report={artifacts['report']['markdown']}")
+    print(f"report_json={artifacts['report']['json']}")
+    print(f"audit_seq={artifacts['audit']['seq']}")
+    return 0
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     paths = _paths(args)
     if args.verify:
@@ -220,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
+        "evaluate": _cmd_evaluate,
     }
     try:
         return handlers[args.command](args)

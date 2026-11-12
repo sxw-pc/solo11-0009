@@ -76,3 +76,28 @@ def finalize_run(
     entry = build_audit_entry(result, result.transformer_map)
     audit_entry = AuditLog(paths.audit_path).append(entry)
     return {"report": report_paths, "audit": audit_entry}
+
+
+def finalize_evaluation(paths: Any, report: dict[str, Any]) -> dict[str, Any]:
+    """Write the evaluation report pair and chain the evaluation into the audit log."""
+    from .evalreport import write_evaluation_reports
+    from .utils import file_sha256
+
+    report_paths = write_evaluation_reports(paths, report)
+    entry = {
+        "event": "evaluate",
+        "evaluation_id": report["evaluation_id"],
+        "source_path": report["source"]["path"],
+        "source_fingerprint": report["source"]["fingerprint"],
+        "product_path": report["product"]["path"],
+        "product_fingerprint": report["product"]["fingerprint"],
+        "parameters": report["parameters"],
+        "summary": report["summary"],
+        "report_markdown": str(report_paths["markdown"]),
+        "report_json": str(report_paths["json"]),
+        "report_markdown_sha256": file_sha256(report_paths["markdown"]),
+        "report_json_sha256": file_sha256(report_paths["json"]),
+        "elapsed_seconds": report["elapsed_seconds"],
+    }
+    audit_entry = AuditLog(paths.audit_path).append(entry)
+    return {"report": report_paths, "audit": audit_entry}
