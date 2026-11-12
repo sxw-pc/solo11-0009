@@ -6,9 +6,54 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import urllib.parse
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock(key: str) -> threading.Lock:
+    with _THREAD_LOCKS_GUARD:
+        return _THREAD_LOCKS.setdefault(key, threading.Lock())
+
+
+@contextmanager
+def file_lock(lock_path: str | Path) -> Iterator[None]:
+    """Exclusive lock shared by threads and processes.
+
+    Many operations here are read-modify-write sequences (audit chain append,
+    target existence check + rename). A per-thread lock serializes threads in
+    one process; ``flock`` on a sidecar file serializes separate processes on
+    POSIX systems. Neither lock file nor lock contents are part of any output.
+    """
+    target = Path(lock_path).expanduser()
+    resolved = str(target.resolve())
+    thread_lock = _thread_lock(resolved)
+    with thread_lock:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a+", encoding="utf-8") as handle:
+            locked = False
+            try:
+                try:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    locked = True
+                except ImportError:  # pragma: no cover - Windows fallback
+                    pass
+                yield
+            finally:
+                if locked:
+                    try:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    except ImportError:  # pragma: no cover
+                        pass
 
 
 class MasklineError(RuntimeError):
@@ -85,6 +130,37 @@ def normalize_sqlite_value(value: Any) -> Any:
             return {"__float__": "inf" if value > 0 else "-inf"}
         return {"__float__": repr(value)}
     return value
+
+
+def csv_content_digest(path: Path) -> str:
+    """Hash a CSV file's header plus rows using the same canonical form as the
+    dataset registry fingerprint. Rows are padded/truncated to the header width,
+    matching :func:`maskline.dataset_io.iter_csv_tuples`.
+    """
+    import csv
+
+    digest = hashlib.sha256(b"maskline-csv-v1\x00")
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.reader(fh)
+        try:
+            header = next(reader)
+        except StopIteration as exc:
+            raise MasklineError(f"CSV file has no header: {path}") from exc
+        digest.update(canonical_json(header).encode("utf-8") + b"\n")
+        for row in reader:
+            if len(row) < len(header):
+                row = row + [""] * (len(header) - len(row))
+            digest.update(canonical_json(list(row[: len(header)])).encode("utf-8") + b"\n")
+    return digest.hexdigest()
+
+
+def content_digest(path: Path, kind: str) -> str:
+    """Logical content digest for a supported artifact format."""
+    if kind == "sqlite":
+        return sqlite_content_digest(path)
+    if kind == "csv":
+        return csv_content_digest(path)
+    raise MasklineError(f"unsupported artifact format: {kind!r}")
 
 
 def sqlite_content_digest(path: Path) -> str:

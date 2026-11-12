@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
+from .utils import MasklineError, atomic_write_text, canonical_json, file_lock, sha256_text
 
 GENESIS_HASH = "0" * 64
 
@@ -42,6 +42,10 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
+        with file_lock(self.path.with_name(self.path.name + ".lock")):
+            return self._append_locked(entry)
+
+    def _append_locked(self, entry: dict[str, Any]) -> dict[str, Any]:
         previous_hash = GENESIS_HASH
         sequence = 1
         if self.path.exists() and self.path.stat().st_size > 0:

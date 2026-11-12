@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -25,31 +26,45 @@ class PseudonymCollision(PseudoMapError):
 
 class PseudoMap:
 
-    def __init__(self, path: str | Path, create: bool = False) -> None:
+    def __init__(self, path: str | Path, create: bool = False, read_only: bool = False) -> None:
         self.path = Path(path)
+        self.read_only = read_only
+        if create and read_only:
+            raise PseudoMapError("create and read_only are mutually exclusive")
         if create:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         elif not self.path.exists():
             raise PseudoMapError(f"pseudonym mapping database not found: {self.path}")
-        self.conn = sqlite3.connect(self.path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pseudonym_map (
-                token TEXT PRIMARY KEY,
-                plaintext TEXT NOT NULL,
-                created_at TEXT NOT NULL
+        if read_only:
+            uri = (
+                "file:"
+                + urllib.parse.quote(self.path.resolve().as_posix(), safe="/:")
+                + "?mode=ro"
             )
-            """
-        )
-        self.conn.commit()
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+            self.conn = sqlite3.connect(uri, uri=True)
+            self.conn.execute("PRAGMA query_only = ON")
+        else:
+            self.conn = sqlite3.connect(self.path)
+        self.conn.row_factory = sqlite3.Row
+        if create:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pseudonym_map (
+                    token TEXT PRIMARY KEY,
+                    plaintext TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.commit()
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
 
     def close(self) -> None:
-        self.commit()
+        if not self.read_only:
+            self.commit()
         self.conn.close()
 
     def __enter__(self) -> "PseudoMap":
@@ -59,9 +74,13 @@ class PseudoMap:
         self.close()
 
     def commit(self) -> None:
+        if self.read_only:
+            raise PseudoMapError("cannot commit to a read-only mapping database")
         self.conn.commit()
 
     def put(self, token: str, plaintext: str) -> None:
+        if self.read_only:
+            raise PseudoMapError("cannot write to a read-only mapping database")
         existing = self.get(token)
         if existing is not None:
             if existing != plaintext:
