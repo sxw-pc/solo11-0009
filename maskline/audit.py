@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+try:  # pragma: no cover - the lock helper is a no-op without fcntl
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
 
