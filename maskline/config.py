@@ -57,6 +57,15 @@ class Paths:
     @property
     def reports_dir(self) -> Path:
         return self.root / "reports"
+    @property
+    def keyring_dir(self) -> Path:
+        return self.data_dir / "keyring"
+    @property
+    def reveal_dir(self) -> Path:
+        return self.data_dir / "reveal"
+    @property
+    def clock_anchor_path(self) -> Path:
+        return self.data_dir / "reveal" / "clock-anchor.json"
 
     def ensure_runtime_dirs(self) -> None:
         for directory in (

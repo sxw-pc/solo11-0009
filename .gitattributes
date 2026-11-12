@@ -1,0 +1,13 @@
+# Enforce LF in the repository regardless of the host OS / mount.
+# The project is an offline Linux/Python tool; CRLF checkouts on Windows
+# drives otherwise produce whole-file diff noise.
+* text=auto eol=lf
+
+# Binary assets must never be rewritten.
+*.sqlite binary
+*.db binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary

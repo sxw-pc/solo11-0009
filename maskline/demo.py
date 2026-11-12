@@ -22,7 +22,7 @@ class DemoResult:
     runs: list[RunResult] = field(default_factory=list)
     reports: list[Path] = field(default_factory=list)
     audit_entries: int = 0
-    revealed_sample: tuple[str, str] | None = None
+    revealed_sample: tuple[str, str | None] | None = None
 
 
 def default_policy_path() -> Path:
@@ -92,11 +92,14 @@ def run_demo(
         )
         print(f"  report={report_md}")
         print(f"  audit entry seq={artifacts['audit']['seq']}")
+    # The mapping database is a key-equivalent asset; the demo never prints
+    # plaintext from it. Re-identification requires the two-person controlled
+    # reveal workflow (see docs/controlled-reveal.md).
     try:
         with PseudoMap(paths.pseudomap_db) as mapping:
-            for token, plaintext in mapping.iter_entries(limit=1):
-                result.revealed_sample = (token, plaintext)
-                print(f"\nReveal sample: {token} -> {plaintext}")
+            for token, _plaintext in mapping.iter_entries(limit=1):
+                result.revealed_sample = (token, None)
+                print(f"\nPseudonym mapping present: {token} (plaintext withheld; use controlled reveal)")
                 break
     except PseudoMapError:
         pass

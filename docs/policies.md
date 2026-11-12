@@ -117,9 +117,9 @@ phone:
 
 - 使用密钥文件中的 `pseudonym_key`，对原文做 HMAC-SHA256 并取前 40 位，输出形如 `psn_...`。
 - 同一密钥、同一原文跨表、跨运行得到同一假名；不同原文不同假名。
-- 明文/假名映射写入独立文件 `data/pseudomap.sqlite`。`python -m maskline reveal --token <token>` 可还原。
+- 明文/假名映射写入独立文件 `data/pseudomap.sqlite`。还原必须走双人受控还原流程（`reveal-request` / `authorize` / `reveal`），不再提供单条 token 的裸还原命令，详见 [controlled-reveal.md](controlled-reveal.md)。
 - `NULL`、空串原样返回。
-- 映射库等同密钥：离开映射库无法还原；持有映射库的人可还原全部假名。不要与脱敏输出一起交付。
+- 映射库等同密钥：离开映射库无法还原；持有映射库的人可还原全部假名。不要与脱敏输出一起交付。受控还原只约束通过本工具发起的还原，能直接读取 SQLite 文件的主体不受其限制。
 - dry-run 会计算假名但不写映射库，因此 dry-run 输出不可用于后续还原。
 
 ### `nullify` 置空

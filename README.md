@@ -95,7 +95,7 @@ maskline/
 ├── Makefile
 ├── secret.example.txt
 ├── maskline/
-│   ├── __main__.py          # demo / scan / run / resume / reveal / audit
+│   ├── __main__.py          # demo / scan / run / resume / keygen / reveal / audit
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
@@ -175,8 +175,17 @@ python -m maskline run --dataset data/raw/demo.sqlite \
 # 续跑被中断的 run（run_id 在错误信息、报告或清单中）
 python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 
-# 用映射库还原某个假名 token
-python -m maskline reveal --token psn_xxxxxxxx
+# 受控还原（双人授权，详见 docs/controlled-reveal.md）
+python -m maskline keygen init
+python -m maskline keygen new --name alice --role operator
+python -m maskline keygen new --name bob   --role reviewer
+python -m maskline reveal-request --operator-kid <alice-kid> \
+  --run-id run-xxxx --dataset data/out/demo.masked.sqlite \
+  --table customers --column full_name --reason "IR-42" --out req.json
+python -m maskline authorize --reviewer-kid <bob-kid> --request req.json \
+  --expires-at 2026-11-12T10:00:00+00:00 --max-rows 100 --out auth.json
+python -m maskline reveal --request req.json --authorization auth.json \
+  --dataset data/out/demo.masked.sqlite --out data/reveal/plain.sqlite
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
@@ -192,7 +201,8 @@ python -m maskline audit --verify
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。
-- **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。
+- **受控还原**：还原假名不再是一条裸命令，而需要操作员申请 + 另一名复核人授权（带过期时间与最大行数），全程校验授权链并写入审计；支持密钥轮换/吊销、时钟回拨检测、重放拦截、批次绑定与临时明文清理。详见 [docs/controlled-reveal.md](docs/controlled-reveal.md)。
+- **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名，受控还原只约束通过本工具发起的还原。
 
 详细风险见 [docs/threat-model.md](docs/threat-model.md)。
 
