@@ -32,5 +32,5 @@ class PseudonymTransformer:
                 raise TransformError("pseudonym transformer requires a mapping store")
             return token
         if context.write_mapping:
-            context.pseudomap.put(token, str(value))
+            context.pseudomap.put(token, str(value), run_id=context.run_id)
         return token

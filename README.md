@@ -95,14 +95,14 @@ maskline/
 ├── Makefile
 ├── secret.example.txt
 ├── maskline/
-│   ├── __main__.py          # demo / scan / run / resume / reveal / audit
+│   ├── __main__.py          # demo / scan / run / resume / clean / reveal / audit
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
-│   ├── pipeline/            # 流式执行、断点、清单
+│   ├── pipeline/            # 流式执行、断点、清单、运行锁与脏资源清理
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
@@ -175,6 +175,10 @@ python -m maskline run --dataset data/raw/demo.sqlite \
 # 续跑被中断的 run（run_id 在错误信息、报告或清单中）
 python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 
+# 清理异常退出残留的脏资源（半成品目标库、孤儿映射条目、失效断点）
+# --dry-run 只报告不删除；--min-free-bytes 磁盘不足时最旧优先清理
+python -m maskline clean --dry-run
+
 # 用映射库还原某个假名 token
 python -m maskline reveal --token psn_xxxxxxxx
 
@@ -189,6 +193,7 @@ python -m maskline audit --verify
 - **登记幂等**：同一内容指纹只登记一次。
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
+- **脏资源清理**：每个 run 持有 `flock` 运行锁，进程被强杀后锁自动失效；`clean` 只回收 `failed` 与失去锁持有者的 stale `running` 残留（半成品目标库、仅被其引用的映射条目、断点与锁文件），`interrupted` 合法断点、`completed` 正式产物与源数据集一律保留；清理跨进程串行、幂等，并在删除前把失败现场写入 `data/cleanup/<run_id>.json`。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。

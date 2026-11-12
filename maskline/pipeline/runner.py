@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import os
+import socket
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -18,6 +20,7 @@ from ..transformers import TransformContext
 from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
+from .locks import LockHeldError, RunLock
 from .manifest import write_manifest
 from .steps import (
     create_target,
@@ -92,14 +95,17 @@ def _prepare_target(
     output = output.expanduser().resolve()
     if output == inventory.path.resolve():
         raise PipelineError("refusing to write the target over the source dataset")
-    create_target(inventory, output)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # The run record lands before the target file so that a crash in between
+    # is always visible to the cleanup pass (never an untracked output).
     store.create_run(
         RunRecord(
             run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
             policy.fingerprint, str(output), "running", now, now,
+            owner_pid=os.getpid(), owner_host=socket.gethostname(),
         )
     )
+    create_target(inventory, output)
     return output
 
 
@@ -164,10 +170,19 @@ def execute_run(
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
+    run_lock: RunLock | None = None
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
             store = CheckpointStore(paths.checkpoint_db)
+            # Hold the run lock for the whole run. The kernel releases it if
+            # this process dies, which is how cleanup tells abnormal-exit
+            # residue apart from runs that are still alive.
+            run_lock = RunLock(paths.lock_dir, run_id)
+            try:
+                run_lock.acquire_or_raise()
+            except LockHeldError as exc:
+                raise PipelineError(str(exc)) from exc
             output = _prepare_target(
                 inventory, policy, paths, store, run_id, resume_run_id, output_path
             )
@@ -178,7 +193,8 @@ def execute_run(
             target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
-                secrets=secrets_store, pseudomap=mapping, write_mapping=True
+                secrets=secrets_store, pseudomap=mapping, write_mapping=True,
+                run_id=run_id,
             )
         else:
             output = None
@@ -244,9 +260,15 @@ def execute_run(
         if store is not None:
             store.set_status(run_id, "interrupted")
         raise
-    except Exception:
-        if store is not None:
-            store.set_status(run_id, "failed")
+    except Exception as exc:
+        # Mark failed only when *this* process owns the run and actually
+        # started it. A resume that fails validation must leave the
+        # legitimate "interrupted" breakpoint untouched, and a lock
+        # conflict must never demote another live process's run.
+        if store is not None and run_lock is not None and run_lock.held:
+            record = store.get_run(run_id)
+            if record is not None and record.status == "running":
+                store.set_status(run_id, "failed", detail=str(exc)[:500])
         raise
     finally:
         if target is not None:
@@ -255,3 +277,5 @@ def execute_run(
             mapping.close()
         if store is not None:
             store.close()
+        if run_lock is not None:
+            run_lock.release()

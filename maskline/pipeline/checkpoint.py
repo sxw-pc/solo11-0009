@@ -20,6 +20,9 @@ class RunRecord:
     status: str
     started_at: str
     updated_at: str
+    owner_pid: int | None = None
+    owner_host: str | None = None
+    status_detail: str | None = None
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "RunRecord":
         return cls(**{key: row[key] for key in row.keys()})
@@ -33,6 +36,14 @@ class TableCheckpoint:
     rows_done: int
     updated_at: str
     counts: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+# Columns added after the initial schema; migrated idempotently at open time.
+_RUN_EXTRA_COLUMNS = (
+    ("owner_pid", "INTEGER"),
+    ("owner_host", "TEXT"),
+    ("status_detail", "TEXT"),
+)
 
 
 class CheckpointStore:
@@ -66,7 +77,25 @@ class CheckpointStore:
             );
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        existing = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(runs)")
+        }
+        for name, ddl in _RUN_EXTRA_COLUMNS:
+            if name in existing:
+                continue
+            try:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {ddl}")
+            except sqlite3.OperationalError:
+                # Another process migrated concurrently; verify and move on.
+                refreshed = {
+                    row[1] for row in self.conn.execute("PRAGMA table_info(runs)")
+                }
+                if name not in refreshed:
+                    raise
 
     def close(self) -> None:
         self.conn.close()
@@ -79,11 +108,18 @@ class CheckpointStore:
 
     def create_run(self, record: RunRecord) -> None:
         self.conn.execute(
-            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO runs (
+                run_id, dataset_path, dataset_fingerprint, policy_path,
+                policy_fingerprint, output_path, status, started_at, updated_at,
+                owner_pid, owner_host, status_detail
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 record.run_id, record.dataset_path, record.dataset_fingerprint,
                 record.policy_path, record.policy_fingerprint, record.output_path,
                 record.status, record.started_at, record.updated_at,
+                record.owner_pid, record.owner_host, record.status_detail,
             ),
         )
         self.conn.commit()
@@ -92,10 +128,10 @@ class CheckpointStore:
         row = self.conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return RunRecord.from_row(row) if row else None
 
-    def set_status(self, run_id: str, status: str) -> None:
+    def set_status(self, run_id: str, status: str, detail: str | None = None) -> None:
         self.conn.execute(
-            "UPDATE runs SET status = ?, updated_at = ? WHERE run_id = ?",
-            (status, _now(), run_id),
+            "UPDATE runs SET status = ?, status_detail = ?, updated_at = ? WHERE run_id = ?",
+            (status, detail, _now(), run_id),
         )
         self.conn.commit()
 
@@ -138,11 +174,36 @@ class CheckpointStore:
         ).fetchall()
         return [_checkpoint_from_row(row) for row in rows]
 
-    def list_runs(self, limit: int = 20) -> list[RunRecord]:
-        rows = self.conn.execute(
-            "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+    def list_runs(self, limit: int | None = 20) -> list[RunRecord]:
+        if limit is None:
+            rows = self.conn.execute(
+                "SELECT * FROM runs ORDER BY started_at DESC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [RunRecord.from_row(row) for row in rows]
+
+    def delete_run(self, run_id: str) -> None:
+        """Remove a run record and all of its checkpoints (idempotent)."""
+        self.conn.execute("DELETE FROM checkpoints WHERE run_id = ?", (run_id,))
+        self.conn.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+        self.conn.commit()
+
+    def output_references(self, output_path: str) -> list[str]:
+        """Run ids whose recorded output path matches ``output_path``."""
+        rows = self.conn.execute(
+            "SELECT run_id FROM runs WHERE output_path = ?", (output_path,)
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def dataset_references(self, dataset_path: str) -> int:
+        """How many runs use ``dataset_path`` as their source dataset."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM runs WHERE dataset_path = ?", (dataset_path,)
+        ).fetchone()
+        return int(row[0])
 
 
 def _checkpoint_from_row(row: sqlite3.Row) -> TableCheckpoint:

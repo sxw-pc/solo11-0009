@@ -52,6 +52,22 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--run-id", required=True)
     resume.add_argument("--batch-size", type=int, default=1000)
     resume.add_argument("--sample-limit", type=int, default=200)
+    clean = sub.add_parser(
+        "clean", parents=[common],
+        help="reclaim dirty resources left by abnormal exits",
+    )
+    clean.add_argument(
+        "--dry-run", action="store_true",
+        help="report what would be cleaned without deleting anything",
+    )
+    clean.add_argument(
+        "--min-age-seconds", type=float, default=0.0,
+        help="ignore residue younger than this many seconds",
+    )
+    clean.add_argument(
+        "--min-free-bytes", type=int, default=None,
+        help="clean oldest residue first until this much free space exists",
+    )
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
@@ -177,6 +193,33 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_clean(args: argparse.Namespace) -> int:
+    from .pipeline.cleanup import clean_workspace
+    paths = _paths(args)
+    report = clean_workspace(
+        paths,
+        min_age_seconds=args.min_age_seconds,
+        min_free_bytes=args.min_free_bytes,
+        dry_run=args.dry_run,
+    )
+    verb = "would-clean" if report.dry_run else "cleaned"
+    for item in report.cleaned:
+        print(
+            f"{verb} run={item.run_id} reason={item.reason} "
+            f"freed={item.freed_bytes}B mappings_removed={item.mapping_entries_removed} "
+            f"scene={item.scene_path}"
+        )
+    for orphan in report.orphan_files_removed:
+        print(f"{verb} orphan={orphan}")
+    print(
+        f"kept: active={len(report.active_run_ids)} "
+        f"interrupted={len(report.interrupted_run_ids)} "
+        f"completed={len(report.completed_run_ids)} "
+        f"total_freed={report.total_freed_bytes}B"
+    )
+    return 0
+
+
 def _cmd_reveal(args: argparse.Namespace) -> int:
     paths = _paths(args)
     try:
@@ -218,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         "scan": _cmd_scan,
         "run": _cmd_run,
         "resume": _cmd_resume,
+        "clean": _cmd_clean,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
     }

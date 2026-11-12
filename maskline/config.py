@@ -52,6 +52,12 @@ class Paths:
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
     @property
+    def lock_dir(self) -> Path:
+        return self.data_dir / "locks"
+    @property
+    def cleanup_dir(self) -> Path:
+        return self.data_dir / "cleanup"
+    @property
     def audit_path(self) -> Path:
         return self.root / "audit" / "audit.jsonl"
     @property
@@ -64,6 +70,7 @@ class Paths:
             self.raw_dir,
             self.out_dir,
             self.manifest_dir,
+            self.lock_dir,
             self.audit_path.parent,
             self.reports_dir,
         ):
