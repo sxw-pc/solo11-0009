@@ -130,6 +130,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             f"  {name}: seen={counts.get('seen', 0)} "
             f"processed={counts.get('processed', 0)} changed={counts.get('changed', 0)}"
         )
+    for key, counts in sorted(result.condition_counts.items()):
+        print(
+            f"  when {key}: matched={counts.get('matched', 0)} "
+            f"skipped={counts.get('skipped', 0)}"
+        )
     if result.dry_run:
         print("dry-run: no target database, checkpoints, audit entries, or reports written")
         return 0

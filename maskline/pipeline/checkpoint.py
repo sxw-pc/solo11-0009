@@ -33,6 +33,7 @@ class TableCheckpoint:
     rows_done: int
     updated_at: str
     counts: dict[str, dict[str, int]] = field(default_factory=dict)
+    condition_counts: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 class CheckpointStore:
@@ -106,9 +107,16 @@ class CheckpointStore:
         last_rowid: int,
         rows_done: int,
         counts: dict[str, dict[str, int]] | None = None,
+        condition_counts: dict[str, dict[str, int]] | None = None,
     ) -> None:
         now = _now()
-        payload = json.dumps(counts or {}, sort_keys=True)
+        payload = json.dumps(
+            {
+                "transforms": counts or {},
+                "conditions": condition_counts or {},
+            },
+            sort_keys=True,
+        )
         self.conn.execute(
             """
             INSERT INTO checkpoints
@@ -146,13 +154,22 @@ class CheckpointStore:
 
 
 def _checkpoint_from_row(row: sqlite3.Row) -> TableCheckpoint:
+    raw = json.loads(row["counts_json"] or "{}")
+    if "transforms" in raw or "conditions" in raw:
+        counts = raw.get("transforms", {})
+        condition_counts = raw.get("conditions", {})
+    else:
+        # Checkpoints written before per-rule condition counts existed stored
+        # the transform counts as a flat mapping.
+        counts, condition_counts = raw, {}
     return TableCheckpoint(
         run_id=row["run_id"],
         table_name=row["table_name"],
         last_rowid=int(row["last_rowid"]),
         rows_done=int(row["rows_done"]),
         updated_at=row["updated_at"],
-        counts=json.loads(row["counts_json"] or "{}"),
+        counts=counts,
+        condition_counts=condition_counts,
     )
 
 

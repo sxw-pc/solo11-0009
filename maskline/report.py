@@ -121,6 +121,11 @@ def _markdown(
         for table, table_policy in rule.tables.items()
         for column, detail in table_policy.columns.items()
     }
+    condition_descriptions = {
+        key: detail.condition.describe()
+        for key, detail in applied.items()
+        if detail.condition is not None
+    }
     lines = [
         "# maskline 脱敏报告",
         "",
@@ -158,16 +163,17 @@ def _markdown(
             "",
             "## 已应用策略",
             "",
-            "| 表 | 列 | 转换器 | 参数 |",
-            "|---|---|---|---|",
+            "| 表 | 列 | 转换器 | 参数 | 行条件 |",
+            "|---|---|---|---|---|",
         ]
     )
     for (table, column), detail in applied.items():
         params = json.dumps(detail.params, ensure_ascii=False, sort_keys=True)
+        condition = condition_descriptions.get((table, column), "—")
         lines.append(
             f"| {_cell(table)} | {_cell(column)} | "
             f"{TRANSFORMER_LABELS.get(detail.transformer, detail.transformer)} "
-            f"(`{detail.transformer}`) | `{_cell(params)}` |"
+            f"(`{detail.transformer}`) | `{_cell(params)}` | {_cell(condition)} |"
         )
     lines.extend(
         [
@@ -184,6 +190,26 @@ def _markdown(
             f"{counts.get('seen', 0)} | {counts.get('processed', 0)} | "
             f"{counts.get('changed', 0)} |"
         )
+    condition_counts = getattr(result, "condition_counts", None) or {}
+    if condition_counts:
+        lines.extend(
+            [
+                "",
+                "## 条件规则命中统计",
+                "",
+                "带 `when` 条件的规则按行判定：命中的行执行变换，跳过的行保留原值写入目标库。",
+                "",
+                "| 表 | 列 | 条件 | 命中（已变换） | 跳过（保留原值） |",
+                "|---|---|---|---:|---:|",
+            ]
+        )
+        for key, counts in sorted(condition_counts.items()):
+            table, _, column = key.rpartition(".")
+            condition = condition_descriptions.get((table, column), "—")
+            lines.append(
+                f"| {_cell(table)} | {_cell(column)} | {_cell(condition)} | "
+                f"{counts.get('matched', 0)} | {counts.get('skipped', 0)} |"
+            )
     lines.extend(["", "## 抽样前后对比", ""])
     for table in inventory.tables:
         rows = samples.get(table.name, [])
@@ -265,6 +291,7 @@ def generate_report(
         },
         "applied_policy": rule.to_dict(),
         "transform_counts": result.transform_counts,
+        "condition_counts": getattr(result, "condition_counts", {}) or {},
         "findings": findings,
         "samples": samples,
         "warnings": warnings,

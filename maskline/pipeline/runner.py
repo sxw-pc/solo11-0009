@@ -43,6 +43,7 @@ class RunResult:
     transform_counts: dict[str, dict[str, int]]
     transformer_map: dict[str, dict[str, str]]
     table_rows: dict[str, int] = field(default_factory=dict)
+    condition_counts: dict[str, dict[str, int]] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
 
@@ -60,6 +61,18 @@ def _requires_secret(rule: DatasetRule) -> bool:
         for table_policy in rule.tables.values()
         for detail in table_policy.columns.values()
     )
+
+
+def _ensure_condition_slots(
+    rule: DatasetRule, counts: dict[str, dict[str, int]]
+) -> None:
+    """List every conditional rule in the counts, even if a table had no rows."""
+    for table_name, table_policy in rule.tables.items():
+        for column_name, detail in table_policy.columns.items():
+            if detail.condition is not None:
+                counts.setdefault(
+                    f"{table_name}.{column_name}", {"matched": 0, "skipped": 0}
+                )
 
 
 def _prepare_target(
@@ -116,13 +129,19 @@ def _process_table(
     batch_size: int,
     batch_counter: list[int],
     interrupt_after_batches: int | None,
-) -> tuple[int, int, dict[str, dict[str, int]]]:
+) -> tuple[int, int, dict[str, dict[str, int]], dict[str, dict[str, int]]]:
     after = checkpoint.last_rowid if checkpoint else 0
     rows_done = checkpoint.rows_done if checkpoint else 0
     table_counts = copy.deepcopy(checkpoint.counts) if checkpoint else {}
+    condition_counts = copy.deepcopy(checkpoint.condition_counts) if checkpoint else {}
     for batch in source_batches(inventory, table, after, batch_size):
         transformed = [
-            (rowid, transform_row(values, table, table_policy, context, table_counts))
+            (
+                rowid,
+                transform_row(
+                    values, table, table_policy, context, table_counts, condition_counts
+                ),
+            )
             for rowid, values in batch
         ]
         if target is not None:
@@ -134,12 +153,16 @@ def _process_table(
         after = transformed[-1][0]
         batch_counter[0] += 1
         if store is not None:
-            store.save_checkpoint(run_id, table.name, after, rows_done, table_counts)
+            store.save_checkpoint(
+                run_id, table.name, after, rows_done, table_counts, condition_counts
+            )
         if interrupt_after_batches is not None and batch_counter[0] >= interrupt_after_batches:
             raise PipelineInterrupted(run_id)
     if store is not None and checkpoint is None:
-        store.save_checkpoint(run_id, table.name, after, rows_done, table_counts)
-    return after, rows_done, table_counts
+        store.save_checkpoint(
+            run_id, table.name, after, rows_done, table_counts, condition_counts
+        )
+    return after, rows_done, table_counts, condition_counts
 
 
 def execute_run(
@@ -187,16 +210,18 @@ def execute_run(
             )
         transformer_map = _transformer_map(rule)
         dry_counts: dict[str, dict[str, int]] = {}
+        dry_conditions: dict[str, dict[str, int]] = {}
         batch_counter = [0]
         for table in inventory.tables:
             checkpoint = store.get_checkpoint(run_id, table.name) if store else None
-            _after, _rows, table_counts = _process_table(
+            _after, _rows, table_counts, table_conditions = _process_table(
                 inventory, table, rule.tables.get(table.name), checkpoint, target,
                 store, context, mapping, run_id, batch_size, batch_counter,
                 interrupt_after_batches,
             )
             if dry_run:
                 merge_counts(dry_counts, table_counts)
+                merge_counts(dry_conditions, table_conditions)
         if target is not None:
             target.commit()
             target.close()
@@ -208,6 +233,7 @@ def execute_run(
                         detail.transformer,
                         {"seen": 0, "processed": 0, "changed": 0},
                     )
+            _ensure_condition_slots(rule, dry_conditions)
             return RunResult(
                 run_id=run_id, dataset_path=inventory.path,
                 dataset_fingerprint=inventory.fingerprint, policy_name=policy.name,
@@ -216,16 +242,20 @@ def execute_run(
                 elapsed_seconds=time.monotonic() - started,
                 transform_counts=dry_counts, transformer_map=transformer_map,
                 table_rows={table.name: table.row_count for table in inventory.tables},
+                condition_counts=dry_conditions,
                 policy_changed=False, dry_run=True,
             )
         assert store is not None and output is not None
         store.set_status(run_id, "completed")
         output_hash = sqlite_content_digest(output)
         final_counts: dict[str, dict[str, int]] = {}
+        final_conditions: dict[str, dict[str, int]] = {}
         table_rows: dict[str, int] = {}
         for checkpoint in store.list_checkpoints(run_id):
             table_rows[checkpoint.table_name] = checkpoint.rows_done
             merge_counts(final_counts, checkpoint.counts)
+            merge_counts(final_conditions, checkpoint.condition_counts)
+        _ensure_condition_slots(rule, final_conditions)
         row_count = sum(table_rows.values())
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
@@ -238,7 +268,8 @@ def execute_run(
             output_hash=output_hash, row_count=row_count,
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
-            table_rows=table_rows, policy_changed=changed, dry_run=False,
+            table_rows=table_rows, condition_counts=final_conditions,
+            policy_changed=changed, dry_run=False,
         )
     except PipelineInterrupted:
         if store is not None:

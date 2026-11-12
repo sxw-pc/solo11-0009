@@ -24,9 +24,9 @@ def merge_counts(
     target: dict[str, dict[str, int]], source: dict[str, dict[str, int]]
 ) -> None:
     for name, values in source.items():
-        slot = target.setdefault(name, {"seen": 0, "processed": 0, "changed": 0})
-        for key in ("seen", "processed", "changed"):
-            slot[key] = slot.get(key, 0) + int(values.get(key, 0))
+        slot = target.setdefault(name, {})
+        for key, number in values.items():
+            slot[key] = slot.get(key, 0) + int(number)
 
 
 def csv_batches(
@@ -92,15 +92,29 @@ def transform_row(
     table_policy: Any,
     context: TransformContext,
     table_counts: dict[str, dict[str, int]],
+    condition_counts: dict[str, dict[str, int]] | None = None,
 ) -> tuple[Any, ...]:
     if table_policy is None:
         return row
+    # Conditions always read pre-transform values, so snapshot the original
+    # row before any column is transformed; the result is order-independent.
+    original = {column.name: value for column, value in zip(table.columns, row)}
     output: list[Any] = []
     for column, value in zip(table.columns, row):
         policy = table_policy.columns.get(column.name)
         if policy is None:
             output.append(value)
             continue
+        if policy.condition is not None:
+            key = f"{table.name}.{column.name}"
+            slot = (condition_counts if condition_counts is not None else {}).setdefault(
+                key, {"matched": 0, "skipped": 0}
+            )
+            if not policy.condition.matches(original):
+                slot["skipped"] += 1
+                output.append(value)
+                continue
+            slot["matched"] += 1
         counts = table_counts.setdefault(
             policy.transformer, {"seen": 0, "processed": 0, "changed": 0}
         )

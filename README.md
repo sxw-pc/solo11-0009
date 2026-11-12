@@ -150,13 +150,15 @@ datasets:
           phone:
             transformer: mask
             params: {keep_prefix: 3, keep_suffix: 4}
+            # 可选：行级条件，只对非 active 客户脱敏，其余行保留原值
+            when: {column: status, op: ne, value: active}
           email: {transformer: hash}
           birth_date:
             transformer: generalize
             params: {mode: date, level: month}
 ```
 
-路径按数据集文件名或完整路径匹配；完整参数与边界见 [docs/policies.md](docs/policies.md)。
+`when` 只支持白名单操作符（`eq`/`ne`/`gt`/`lt`/`contains`/`is_null`），按变换前的原始行值判定，`NULL` 视为不满足；命中/跳过计数会写入报告。路径按数据集文件名或完整路径匹配；完整参数与边界见 [docs/policies.md](docs/policies.md)，条件示例见 `policies/example-when.yaml`。
 
 ## 常用命令
 

@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from .conditions import Condition, ConditionError, parse_condition
 from .registry import DatasetInventory
 from .transformers import REGISTRY, TransformError
 from .utils import MasklineError, canonical_json
@@ -23,9 +24,16 @@ class PolicyError(MasklineError):
 class ColumnPolicy:
     transformer: str
     params: dict[str, Any] = field(default_factory=dict)
+    condition: Condition | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"transformer": self.transformer, "params": dict(self.params)}
+        data: dict[str, Any] = {
+            "transformer": self.transformer,
+            "params": dict(self.params),
+        }
+        if self.condition is not None:
+            data["when"] = self.condition.to_dict()
+        return data
 
 
 @dataclass(frozen=True)
@@ -88,11 +96,18 @@ class Policy:
                     f"in {inventory.path.name}"
                 )
             known_columns = {column.name for column in table.columns}
-            for column_name in table_policy.columns:
+            for column_name, column_policy in table_policy.columns.items():
                 if column_name not in known_columns:
                     raise PolicyError(
                         f"policy refers to unknown column {table_name}.{column_name} "
                         f"in {inventory.path.name}"
+                    )
+                condition = column_policy.condition
+                if condition is not None and condition.column not in known_columns:
+                    raise PolicyError(
+                        f"policy rule for {table_name}.{column_name} refers to "
+                        f"unknown column {table_name}.{condition.column} in its "
+                        f"'when' condition in {inventory.path.name}"
                     )
         return rule
 
@@ -131,11 +146,12 @@ def _expect_mapping(value: Any, where: str) -> Mapping[str, Any]:
 def _parse_column(name: str | int, raw: Any, where: str) -> tuple[str, ColumnPolicy]:
     if not isinstance(name, str) or not name:
         raise PolicyError(f"{where}: column names must be non-empty strings")
+    condition: Condition | None = None
     if isinstance(raw, str):
         transformer, params = raw, {}
     else:
         config = _expect_mapping(raw, where)
-        unknown = set(config) - {"transformer", "params"}
+        unknown = set(config) - {"transformer", "params", "when"}
         if unknown:
             raise PolicyError(f"{where}: unknown keys: {', '.join(sorted(unknown))}")
         if "transformer" not in config:
@@ -145,11 +161,16 @@ def _parse_column(name: str | int, raw: Any, where: str) -> tuple[str, ColumnPol
         if not isinstance(transformer, str) or not transformer:
             raise PolicyError(f"{where}: transformer must be a non-empty string")
         params = _expect_mapping(params, f"{where}.params")
+        if "when" in config:
+            try:
+                condition = parse_condition(config["when"], where)
+            except ConditionError as exc:
+                raise PolicyError(str(exc)) from exc
     try:
         resolved = REGISTRY.validate_params(transformer, params)
     except TransformError as exc:
         raise PolicyError(f"{where}: {exc}") from exc
-    return name, ColumnPolicy(transformer, resolved)
+    return name, ColumnPolicy(transformer, resolved, condition)
 
 
 def _parse_policy(data: Any, source_path: Path) -> Policy:

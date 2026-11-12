@@ -1,0 +1,24 @@
+# Example: row-level `when` conditions on the synthetic `maskline demo` data.
+# Rows that do not match a condition keep their original values in the target.
+# Run with:
+#   python -m maskline run --dataset data/raw/demo.sqlite \
+#     --policy policies/example-when.yaml
+version: 1
+name: demo-conditional-masking
+description: Mask only rows matching a condition; other rows keep original values.
+
+datasets:
+  - path: "demo.sqlite"
+    tables:
+      customers:
+        columns:
+          # Mask phone numbers of non-active customers only; active customers
+          # (the VIP analogue in the demo fixture) keep their original values.
+          phone:
+            transformer: mask
+            params: { keep_prefix: 3, keep_suffix: 4 }
+            when: { column: status, op: ne, value: active }
+          # Clear notes only for high-balance rows; other rows keep the text.
+          notes:
+            transformer: nullify
+            when: { column: balance, op: gt, value: 50000 }
