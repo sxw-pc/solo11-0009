@@ -95,7 +95,7 @@ maskline/
 ├── Makefile
 ├── secret.example.txt
 ├── maskline/
-│   ├── __main__.py          # demo / scan / run / resume / reveal / audit
+│   ├── __main__.py          # demo / scan / run / resume / reveal / evaluate / audit
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
@@ -103,9 +103,10 @@ maskline/
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
-│   ├── pseudomap.py         # 可逆假名映射
+│   ├── evaluate/            # 只读量化评估：定长草图、外部哈希聚合、双格式报告
+│   ├── pseudomap.py         # 可逆假名映射（evaluate 子系统禁止导入）
 │   ├── audit.py             # 追加式 JSONL 审计链
-│   ├── report.py            # Markdown / JSON 报告
+│   ├── report.py            # Markdown / JSON 脱敏报告
 │   ├── workflow.py          # 扫描、收尾、审计的共享流程
 │   ├── fixturegen.py        # 固定种子合成数据
 │   └── demo.py              # 一键演示编排
@@ -183,6 +184,27 @@ python -m maskline audit --verify
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
+
+## 脱敏产物量化评估（`evaluate`）
+
+把脱敏产物交给外包团队前，用独立的 `evaluate` 子命令以**只读**方式同时打开源数据集与脱敏产物，产出一份量化效用/风险报告。评估全程不打开假名映射库，报告只包含聚合统计、分桶结果与占比，不含任何原始明文取值。
+
+```bash
+python -m maskline evaluate \
+  --source data/raw/demo.sqlite \
+  --product data/out/demo.masked.sqlite \
+  --quasi-identifier "customers:birth_date,address" \
+  --quasi-identifier "orders:created_at,status" \
+  --join "customers.customer_id=orders.customer_id"
+```
+
+- **效用侧**：每列的基数变化（HyperLogLog 估计）、空值率变化、类别列分布差异（Misra-Gries 重值摘要 + 总变差距离 TVD）、数值列在源值域上的等宽分桶分布差异，以及存在外键关系的两表在产物中的连接保持率（布隆过滤器，假阳性上界写入 JSON）。
+- **风险侧**：按 `--quasi-identifier 表:列1,列2`（可重复指定多组）统计产物中每个等价类的记录数，给出最小等价类规模、唯一化比例（单记录等价类占比）、各规模阈值下的等价类数量。
+- **小样本桶合并**：样本量低于 `--min-bucket`（默认 5）的类别桶/数值桶合并为「其他」；等价类规模分布同样按该阈值合并。
+- **有界内存**：所有聚合要么是定长草图，要么是落盘的外部哈希聚合（`--max-memory-keys` 控制内存分组上限，`--spill-dir` 指定临时目录，结束即清理），内存占用不随行数线性增长，可处理千万行表。
+- **零效用显式化**：某列在产物中被整体置空时，报告把该列标记为 `效用归零` 并在告警区与命令行输出中明确列出，而不是报错或静默跳过；缺失的表/列给出结构告警并按归零处理。
+- **留痕与双格式**：评估动作作为 `event: evaluation` 记录追加进同一条哈希链审计日志；报告同时写 Markdown 与 JSON（`<eval-id>.eval.md` / `.eval.json`），两者由同一内存数据结构渲染，数字一致，JSON 另附哈希进审计。
+- 数值分桶只针对源 schema 声明为数值类型的列；电话号码、银行卡号等数字型文本标识按类别列处理，避免暴露标识取值区间。
 
 ## 幂等、断点与安全边界
 

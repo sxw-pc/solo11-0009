@@ -54,6 +54,41 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--sample-limit", type=int, default=200)
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
+    evaluate = sub.add_parser(
+        "evaluate",
+        parents=[common],
+        help="read-only quantitative utility/risk evaluation of a masked product",
+    )
+    evaluate.add_argument("--source", required=True, help="original dataset (sqlite/csv)")
+    evaluate.add_argument("--product", required=True, help="masked dataset (sqlite/csv)")
+    evaluate.add_argument(
+        "--quasi-identifier",
+        action="append",
+        default=[],
+        metavar="TABLE:COL[,COL...]",
+        help="quasi-identifier column combination; repeat for multiple groups",
+    )
+    evaluate.add_argument(
+        "--join",
+        action="append",
+        default=[],
+        metavar="PARENT_TABLE.PARENT_COL=CHILD_TABLE.CHILD_COL",
+        help="foreign-key relationship to measure join retention; repeatable",
+    )
+    evaluate.add_argument("--buckets", type=int, default=10, help="numeric histogram buckets")
+    evaluate.add_argument(
+        "--min-bucket",
+        type=int,
+        default=5,
+        help="buckets below this sample size are merged into 'other'",
+    )
+    evaluate.add_argument("--top-k", type=int, default=64, help="max reported category buckets")
+    evaluate.add_argument(
+        "--spill-dir", default=None, help="directory for bounded external aggregation spills"
+    )
+    evaluate.add_argument(
+        "--max-memory-keys", type=int, default=200_000, help="in-memory group cap before spill"
+    )
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
@@ -188,6 +223,38 @@ def _cmd_reveal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    from .evaluate.workflow import run_evaluation
+
+    artifacts = run_evaluation(
+        paths=_paths(args),
+        source=args.source,
+        product=args.product,
+        qi_expressions=args.quasi_identifier,
+        join_expressions=args.join,
+        bucket_count=args.buckets,
+        min_bucket=args.min_bucket,
+        top_k=args.top_k,
+        spill_dir=args.spill_dir,
+        max_memory_keys=args.max_memory_keys,
+    )
+    print(f"evaluation={artifacts['evaluation_id']}")
+    print(f"json_report={artifacts['json']}")
+    print(f"markdown_report={artifacts['markdown']}")
+    print(f"audit_seq={artifacts['audit_seq']}")
+    for warning in artifacts["warnings"]:
+        print(f"warning: {warning}")
+    zeroed = [
+        f"{table['table']}.{column['column']}"
+        for table in artifacts["tables"]
+        for column in table["columns"]
+        if column.get("utility_status") == "zero"
+    ]
+    if zeroed:
+        print("zero_utility_columns=" + ",".join(zeroed))
+    return 0
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     paths = _paths(args)
     if args.verify:
@@ -219,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": _cmd_run,
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
+        "evaluate": _cmd_evaluate,
         "audit": _cmd_audit,
     }
     try:
