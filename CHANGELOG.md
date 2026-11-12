@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- 增量扫描：registry 升级到 schema v2，新增表级结构指纹与列级内容指纹。未变更表/列
+  逐字节沿用历史 findings，加列/删列/单列值变化只重检受影响列，行数显著变化（默认
+  >50%）或 detector 版本/sample_limit 变化才整表重扫；`scan --full` 可强制全量。
+- v1 registry 自动迁移：打开旧库时在单事务内迁移到 v2，失败回滚、可重试；遇到更新
+  版本的 registry 抛出明确的 `RegistryVersionError`。
+- 中断安全：每个数据集的增量写入包在单个事务中，Ctrl-C 回滚，残留的 running 扫描
+  记账行在下次扫描时自动清理，不参与复用判定。
+- 设计文档：`docs/incremental-scan.md` 说明指纹粒度取舍（表级结构 + 列级内容）及
+  各项承诺。
+
 ## v0.1.0
 
 首个可用版本，全部功能离线运行。

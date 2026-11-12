@@ -41,6 +41,10 @@ def _parser() -> argparse.ArgumentParser:
     scan = sub.add_parser("scan", parents=[common], help="register datasets and detect columns")
     scan.add_argument("target", nargs="?", default="data/raw", help="file or directory")
     scan.add_argument("--sample-limit", type=int, default=200)
+    scan.add_argument(
+        "--full", action="store_true",
+        help="ignore cached fingerprints and rescore every column",
+    )
     run = sub.add_parser("run", parents=[common], help="mask a dataset with a policy")
     run.add_argument("--dataset", required=True)
     run.add_argument("--policy", required=True)
@@ -72,6 +76,13 @@ def _print_scan(summaries: list[Any]) -> None:
             f"fingerprint={inventory.fingerprint[:16]}...  "
             f"{'new' if summary.newly_registered else 'already registered'}"
         )
+        mode = "full" if summary.force_full else "incremental"
+        print(
+            f"  scan={mode} tables: reused={summary.reused_tables} "
+            f"rescanned={summary.rescanned_tables} new={summary.new_tables} | "
+            f"columns: reused={summary.reused_columns} "
+            f"scanned={summary.scanned_columns}"
+        )
         for finding in summary.findings:
             if finding["confidence"] in {"high", "medium"}:
                 print(
@@ -94,7 +105,9 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     paths = _paths(args)
-    summaries = scan_paths([args.target], paths, sample_limit=args.sample_limit)
+    summaries = scan_paths(
+        [args.target], paths, sample_limit=args.sample_limit, force_full=args.full
+    )
     _print_scan(summaries)
     return 0
 

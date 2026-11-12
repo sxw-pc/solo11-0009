@@ -141,10 +141,23 @@ def detect_inventory(
 
 
 def scan_inventory(
-    inventory: DatasetInventory, catalog: Catalog, sample_limit: int = 200
-) -> list[dict[str, Any]]:
-    """Sample every column, score it, persist findings, and return the rows."""
-    findings = detect_inventory(inventory, sample_limit=sample_limit)
-    for record in findings:
-        catalog.save_finding(record)
-    return findings
+    inventory: DatasetInventory,
+    catalog: Catalog,
+    sample_limit: int = 200,
+    force_full: bool = False,
+):
+    """Incrementally sample, score, and persist findings.
+
+    Tables whose structure/content fingerprints match the registry are not
+    rescored: their stored findings are reused byte-for-byte. Returns an
+    :class:`~maskline.detectors.incremental.IncrementalResult`; the ``findings``
+    attribute keeps the same record shape as :func:`detect_inventory`.
+    """
+    from .incremental import run_incremental_scan
+
+    # Keep the legacy v1 registration table in sync for tooling that still
+    # reads it; the v2 catalog is the source of truth for incremental scans.
+    catalog.register(inventory)
+    return run_incremental_scan(
+        inventory, catalog, sample_limit=sample_limit, force_full=force_full
+    )

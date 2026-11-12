@@ -11,7 +11,7 @@ from .config import SecretStore
 from .dataset_io import discover_datasets
 from .detectors.engine import scan_inventory
 from .policies import Policy
-from .registry import Catalog, DatasetInventory, inspect_dataset
+from .registry import Catalog, DatasetInventory, inspect_dataset, stable_dataset_id
 from .report import generate_report
 from .utils import MasklineError
 
@@ -21,10 +21,20 @@ class ScanSummary:
     inventory: DatasetInventory
     newly_registered: bool
     findings: list[dict[str, Any]]
+    reused_tables: int = 0
+    rescanned_tables: int = 0
+    new_tables: int = 0
+    reused_columns: int = 0
+    scanned_columns: int = 0
+    scan_id: str = ""
+    force_full: bool = False
 
 
 def scan_paths(
-    targets: Iterable[str | Path], paths: Any, sample_limit: int = 200
+    targets: Iterable[str | Path],
+    paths: Any,
+    sample_limit: int = 200,
+    force_full: bool = False,
 ) -> list[ScanSummary]:
     files: list[Path] = []
     for target in targets:
@@ -36,9 +46,28 @@ def scan_paths(
     with Catalog(paths.meta_db) as catalog:
         for path in unique:
             inventory = inspect_dataset(path)
-            newly = catalog.register(inventory)
-            findings = scan_inventory(inventory, catalog, sample_limit=sample_limit)
-            summaries.append(ScanSummary(inventory, newly, findings))
+            dataset_id = stable_dataset_id(inventory.path)
+            was_known = catalog.dataset_state(dataset_id) is not None
+            result = scan_inventory(
+                inventory,
+                catalog,
+                sample_limit=sample_limit,
+                force_full=force_full,
+            )
+            summaries.append(
+                ScanSummary(
+                    inventory=inventory,
+                    newly_registered=not was_known,
+                    findings=result.findings,
+                    reused_tables=result.reused_tables,
+                    rescanned_tables=result.rescanned_tables,
+                    new_tables=result.new_tables,
+                    reused_columns=result.reused_columns,
+                    scanned_columns=result.scanned_columns,
+                    scan_id=result.scan_id,
+                    force_full=force_full,
+                )
+            )
     return summaries
 
 

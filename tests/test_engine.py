@@ -82,11 +82,16 @@ def test_scan_persists_findings_and_registration_is_idempotent(workspace, invent
     with Catalog(workspace.meta_db) as catalog:
         assert catalog.register(inventory) is True
         assert catalog.register(inventory) is False
-        findings = scan_inventory(inventory, catalog)
+        result = scan_inventory(inventory, catalog)
         stored = catalog.findings_for(inventory.fingerprint)
-        assert len(stored) == len(findings) == 20
+        assert len(stored) == len(result.findings) == 20
         assert {item["column_name"] for item in stored} >= {"phone", "id_card"}
         assert len(catalog.list_datasets()) == 1
+        # A second scan reuses every table and writes nothing new.
+        second = scan_inventory(inventory, catalog)
+        assert second.reused_tables == result.total_tables
+        assert second.scanned_columns == 0
+        assert catalog.findings_for(inventory.fingerprint) == stored
 
 def test_detect_inventory_is_pure(workspace, inventories):
     findings = detect_inventory(inventories["sqlite"])

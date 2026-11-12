@@ -161,8 +161,11 @@ datasets:
 ## 常用命令
 
 ```bash
-# 扫描目录或单个文件，登记并输出高/中置信度发现
+# 扫描目录或单个文件，登记并输出高/中置信度发现（默认增量，只重检变化的表/列）
 python -m maskline scan data/raw
+
+# 忽略缓存指纹，对所有列重新打分
+python -m maskline scan data/raw --full
 
 # 执行脱敏，写出独立目标库、报告与审计
 python -m maskline run --dataset data/raw/demo.sqlite \
@@ -187,6 +190,11 @@ python -m maskline audit --verify
 ## 幂等、断点与安全边界
 
 - **登记幂等**：同一内容指纹只登记一次。
+- **增量扫描**：registry 保存表级结构指纹与列级内容指纹；未变更的表/列直接沿用上
+  次 findings（含置信度与样本证据，逐字节一致），结构或数据变化的表只重检受影响的
+  列，行数大幅变化（默认 >50%）才整表重扫。旧版 registry 首次打开自动迁移到 v2
+  schema；单个数据集的增量写入在一个事务内提交，Ctrl-C 回滚不污染下次扫描。设计细节
+  见 [docs/incremental-scan.md](docs/incremental-scan.md)。
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
