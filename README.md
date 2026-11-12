@@ -16,6 +16,7 @@
 
 - 本地数据集的敏感字段发现引擎（正则 + 校验位 + 中文词典启发）
 - 基于 YAML 的声明式脱敏策略执行器
+- 跨版本发现结果对比与漂移检测（字段增删 / 类型变更 / 等级调整）
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
 - Markdown / JSON 脱敏报告生成器
@@ -100,6 +101,7 @@ maskline/
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
+│   ├── drift.py             # 跨版本漂移对比、采样容差、忽略规则指纹
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
@@ -158,6 +160,38 @@ datasets:
 
 路径按数据集文件名或完整路径匹配；完整参数与边界见 [docs/policies.md](docs/policies.md)。
 
+## 跨版本漂移检测
+
+同一数据集路径登记了新的内容版本（更新数据或调整结构）时，`scan` / `run` 会自动把新版本的发现结果与上一版本对比，覆盖三类核心漂移：
+
+- **字段新增 / 删除**：新增的高/中置信度敏感字段按高严重度告警；
+- **敏感类型变更**：如 `email` 列变成了手机号列，或普通文本列新检出敏感类型；
+- **敏感等级调整**：类型不变但置信度等级变化（如 中 → 高）。
+
+对比只读取登记库中的发现结果元数据，不触碰数据集内容，全程离线；耗时与数据集体积无关，远低于原扫描时间的 15%。命中率与校验通过率波动在 5% 以内（含恰好 5%）的分类翻转视为采样误差，不触发告警。
+
+每次版本对比（包括零漂移）都会向审计链追加一条 `dataset_drift` 记录，并写入登记库 `drift_reports` 表；脱敏报告的「跨版本漂移检测」章节与审计记录完全一致，并标注审计序号与条目哈希。历史 registry 库打开时自动就地升级（仅追加新表），旧发现记录不改动、可正常查询。
+
+```bash
+# 扫描时自动检测；也可随时对同一数据集最近两个登记版本做只读对比
+python -m maskline drift --dataset data/raw/demo.sqlite
+
+# 配置漂移忽略规则（与策略文件一样校验并记录指纹）
+python -m maskline scan data/raw --ignore-rules drift-ignore.yaml
+```
+
+忽略规则示例（被忽略的事件不会删除，而是以 suppressed 形式连同规则指纹一起留痕）：
+
+```yaml
+version: 1
+name: known-noise
+rules:
+  - table: customers
+    column: notes
+    drift_types: [field_added, level_changed]   # 缺省表示全部漂移类型
+    reason: 已确认的外围备注列
+```
+
 ## 常用命令
 
 ```bash
@@ -178,6 +212,9 @@ python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 # 用映射库还原某个假名 token
 python -m maskline reveal --token psn_xxxxxxxx
 
+# 对比同一数据集最近两个登记版本的发现结果（只读）
+python -m maskline drift --dataset data/raw/demo.sqlite
+
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
 ```
@@ -187,6 +224,7 @@ python -m maskline audit --verify
 ## 幂等、断点与安全边界
 
 - **登记幂等**：同一内容指纹只登记一次。
+- **漂移检测**：同一数据集路径登记新内容版本时自动与上一版本对比；重复扫描同一内容不会重复产生漂移记录。
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。

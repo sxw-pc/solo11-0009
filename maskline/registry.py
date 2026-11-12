@@ -23,6 +23,11 @@ from .dataset_io import (
 )
 from .utils import canonical_json, normalize_sqlite_value, quote_ident
 
+# Catalog schema history:
+#   0 -> original datasets/findings tables (historical registry databases)
+#   1 -> adds drift_reports (additive only; existing rows are never touched)
+SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ColumnInfo:
@@ -143,7 +148,12 @@ def inspect_dataset(path: str | Path) -> DatasetInventory:
 
 
 class Catalog:
-    """Metadata database: dataset registrations and detector findings."""
+    """Metadata database: dataset registrations, detector findings, drift reports.
+
+    Opening a historical (schema v0) registry database upgrades it in place by
+    *adding* the drift_reports table; existing datasets/findings rows are never
+    modified, and older maskline versions can still open the upgraded file.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -175,9 +185,26 @@ class Catalog:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_fingerprint, table_name, column_name)
             );
+            CREATE TABLE IF NOT EXISTS drift_reports (
+                drift_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_path TEXT NOT NULL,
+                baseline_fingerprint TEXT NOT NULL,
+                current_fingerprint TEXT NOT NULL,
+                ignore_fingerprint TEXT,
+                record_json TEXT NOT NULL,
+                audit_seq INTEGER,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < SCHEMA_VERSION:
+            self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.conn.commit()
+
+    @property
+    def schema_version(self) -> int:
+        return int(self.conn.execute("PRAGMA user_version").fetchone()[0])
 
     def close(self) -> None:
         self.conn.close()
@@ -277,6 +304,54 @@ class Catalog:
         for row in rows:
             item = dict(row)
             item["candidates"] = json.loads(item.pop("candidates_json"))
+            result.append(item)
+        return result
+
+    def datasets_for_path(self, path: str | Path) -> list[dict[str, Any]]:
+        """All registered versions of one dataset path, oldest first.
+
+        Versions share the same resolved path but differ in content
+        fingerprint; rowid order is registration (insertion) order.
+        """
+        rows = self.conn.execute(
+            "SELECT rowid AS version_seq, * FROM datasets WHERE path = ? "
+            "ORDER BY rowid",
+            (str(path),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["tables"] = json.loads(item.pop("tables_json"))
+            result.append(item)
+        return result
+
+    def save_drift_report(self, record: dict[str, Any], audit_seq: int | None) -> None:
+        self.conn.execute(
+            "INSERT INTO drift_reports "
+            "(dataset_path, baseline_fingerprint, current_fingerprint, "
+            " ignore_fingerprint, record_json, audit_seq, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                record["dataset_path"],
+                record["baseline_fingerprint"],
+                record["current_fingerprint"],
+                record.get("ignore_fingerprint"),
+                json.dumps(record, ensure_ascii=False),
+                audit_seq,
+                _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def drift_reports_for(self, path: str | Path) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM drift_reports WHERE dataset_path = ? ORDER BY drift_id",
+            (str(path),),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["record"] = json.loads(item.pop("record_json"))
             result.append(item)
         return result
 
