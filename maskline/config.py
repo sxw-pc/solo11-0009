@@ -52,6 +52,21 @@ class Paths:
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
     @property
+    def governor_db(self) -> Path:
+        return self.data_dir / "governor.sqlite"
+    @property
+    def governor_dir(self) -> Path:
+        return self.root / "governor"
+    @property
+    def governor_pid_file(self) -> Path:
+        return self.governor_dir / "governor.pid"
+    @property
+    def governor_log_dir(self) -> Path:
+        return self.governor_dir / "logs"
+    @property
+    def governor_event_dir(self) -> Path:
+        return self.governor_dir / "events"
+    @property
     def audit_path(self) -> Path:
         return self.root / "audit" / "audit.jsonl"
     @property
@@ -66,6 +81,9 @@ class Paths:
             self.manifest_dir,
             self.audit_path.parent,
             self.reports_dir,
+            self.governor_dir,
+            self.governor_log_dir,
+            self.governor_event_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

@@ -19,6 +19,7 @@ from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
 from .manifest import write_manifest
+from .progress import emit_event
 from .steps import (
     create_target,
     insert_batch,
@@ -161,6 +162,10 @@ def execute_run(
         raise PipelineError("dry-run cannot be combined with resume")
     started = time.monotonic()
     run_id = resume_run_id or new_run_id()
+    emit_event(
+        "run_started",
+        {"run_id": run_id, "resume": bool(resume_run_id), "dry_run": dry_run},
+    )
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
@@ -231,6 +236,7 @@ def execute_run(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
             row_count, transformer_map, final_counts,
         )
+        emit_event("run_completed", {"run_id": run_id, "row_count": row_count})
         return RunResult(
             run_id=run_id, dataset_path=inventory.path,
             dataset_fingerprint=inventory.fingerprint, policy_name=policy.name,
@@ -243,10 +249,12 @@ def execute_run(
     except PipelineInterrupted:
         if store is not None:
             store.set_status(run_id, "interrupted")
+        emit_event("run_interrupted", {"run_id": run_id})
         raise
-    except Exception:
+    except Exception as exc:
         if store is not None:
             store.set_status(run_id, "failed")
+        emit_event("run_failed", {"run_id": run_id, "error": type(exc).__name__})
         raise
     finally:
         if target is not None:

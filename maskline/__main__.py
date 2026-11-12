@@ -54,6 +54,14 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--sample-limit", type=int, default=200)
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
+    # Deliberately no `parents=[common]`: the governor CLI owns its own
+    # top-level --workspace/--config flags, and REMAINDER must pass them
+    # through verbatim instead of the outer parser consuming them.
+    governor = sub.add_parser(
+        "governor",
+        help="resource quota governance and FIFO scheduling (see governor --help)",
+    )
+    governor.add_argument("governor_args", nargs=argparse.REMAINDER)
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
@@ -188,6 +196,15 @@ def _cmd_reveal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_governor(args: argparse.Namespace) -> int:
+    from .governor.cli import main as governor_main
+    governor_args = list(args.governor_args or [])
+    if governor_args and governor_args[0] == "--":
+        governor_args = governor_args[1:]
+    # All flags (including --workspace) belong to the governor CLI itself.
+    return governor_main(governor_args)
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     paths = _paths(args)
     if args.verify:
@@ -219,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": _cmd_run,
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
+        "governor": _cmd_governor,
         "audit": _cmd_audit,
     }
     try:

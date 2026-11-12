@@ -103,6 +103,7 @@ maskline/
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
+│   ├── governor/            # 离线资源配额管控、FIFO 调度、降速/暂停/自愈
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
@@ -183,6 +184,24 @@ python -m maskline audit --verify
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
+
+## 资源配额管控（governor）
+
+多个脱敏任务并发时，可用内置的离线管控层统一排队并限制 CPU、内存与运行时长，避免占满办公机资源或因 OOM 中断。它复用流式执行、断点续跑与状态存储，任务命令本身无需修改：
+
+```bash
+# 启动守护进程（PID 锁保证单实例）
+maskline governor start --workspace <工作区> --config configs/governor.example.yaml
+
+# 用现有命令原样提交任务（放在 -- 之后），超并发自动排队
+maskline governor submit --workspace <工作区> --name daily-leads -- \
+  maskline run --dataset data/raw/demo.sqlite --policy policies/example.yaml
+
+# 实时查看资源占用与配额使用；配额调整、暂停/恢复、取消全程写入审计哈希链
+maskline governor ps --workspace <工作区> --all
+```
+
+超配额时自动降速（SIGSTOP/SIGCONT 占空）或在批边界暂停并落 rowid 断点，资源释放后用同一 `run_id` 自动续跑，保证不重复、不丢数据；任务异常会终止整个进程组释放资源并按检查点自愈。详见 [docs/governor.md](docs/governor.md)。
 
 ## 幂等、断点与安全边界
 

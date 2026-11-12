@@ -1,0 +1,39 @@
+# maskline governor（脱敏任务资源配额管控）示例配置
+#
+# 完全离线生效；除 PyYAML 外无任何第三方依赖，也不依赖外部调度组件。
+# 所有字段均可省略，省略时使用内置默认值。
+
+# ---------------------------------------------------------------
+# 全局默认配额（对所有未单独固定的任务生效）
+# ---------------------------------------------------------------
+defaults:
+  cpu_max_percent: 70.0      # 单任务 CPU 使用率上限（占一个核算 100%）
+  memory_max_mb: 2048        # 单任务常驻内存 RSS 上限（MiB）
+  max_runtime_seconds: 1800  # 单次执行切片最大运行时长（秒），到点落断点后续跑
+
+# 同时占用并发槽位的任务数上限；超出的任务按提交顺序排队等待而非报错
+max_concurrency: 2
+
+# 调度采样与降速相关调优项（一般保持默认即可）
+sample_interval_seconds: 2.0     # 资源采样 / 调度 tick 间隔
+throttle_stop_seconds: 0.2       # CPU 超限时每次 SIGSTOP 降速的基础时长
+throttle_breach_limit: 3         # 连续多少次 CPU 超限开始降速；两倍后升级为暂停
+resume_cooldown_seconds: 5.0     # 暂停后等待系统资源释放的冷却时长
+max_resume_attempts: 10          # 同一任务最多自动续跑次数，超过则标记 failed
+memory_recover_ratio: 0.9        # 系统可用内存占比低于 (1-该值) 时触发暂停
+
+# ---------------------------------------------------------------
+# 单任务自定义配额：按提交时的任务名（--name 或由 --dataset 文件名派生）
+# 解析优先级：内置默认 < defaults < jobs.<name> < 提交时 --quota 覆盖
+# ---------------------------------------------------------------
+jobs:
+  # 超大客户库脱敏：放宽内存与时长，避免频繁切片
+  huge-customer-warehouse:
+    cpu_max_percent: 90.0
+    memory_max_mb: 8192
+    max_runtime_seconds: 7200
+
+  # 轻量定时任务：收紧 CPU，给日常办公留出资源
+  daily-leads:
+    cpu_max_percent: 25.0
+    memory_max_mb: 512
