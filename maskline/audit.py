@@ -4,14 +4,38 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
+
 GENESIS_HASH = "0" * 64
+
+
+@contextmanager
+def _append_lock(path: Path) -> Iterator[None]:
+    """Serialize read-modify-write appends across concurrent processes/threads.
+
+    Best-effort: on platforms without fcntl the lock is a no-op.
+    """
+    if fcntl is None:
+        yield
+        return
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class AuditError(MasklineError):
@@ -42,28 +66,29 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
-        previous_hash = GENESIS_HASH
-        sequence = 1
-        if self.path.exists() and self.path.stat().st_size > 0:
-            verification = self.verify()
-            entries = read_audit_entries(self.path)
-            previous_hash = verification.head_hash
-            sequence = len(entries) + 1
-        body = dict(entry)
-        body.pop("entry_hash", None)
-        body.pop("prev_hash", None)
-        body.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        body["seq"] = sequence
-        body["prev_hash"] = previous_hash
-        entry_hash = sha256_text(canonical_json(body))
-        stored = dict(body)
-        stored["entry_hash"] = entry_hash
-        with self.path.open("a", encoding="utf-8", newline="\n") as fh:
-            fh.write(canonical_json(stored) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        self._write_head(sequence, entry_hash)
-        return stored
+        with _append_lock(self.path):
+            previous_hash = GENESIS_HASH
+            sequence = 1
+            if self.path.exists() and self.path.stat().st_size > 0:
+                verification = self.verify()
+                entries = read_audit_entries(self.path)
+                previous_hash = verification.head_hash
+                sequence = len(entries) + 1
+            body = dict(entry)
+            body.pop("entry_hash", None)
+            body.pop("prev_hash", None)
+            body.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+            body["seq"] = sequence
+            body["prev_hash"] = previous_hash
+            entry_hash = sha256_text(canonical_json(body))
+            stored = dict(body)
+            stored["entry_hash"] = entry_hash
+            with self.path.open("a", encoding="utf-8", newline="\n") as fh:
+                fh.write(canonical_json(stored) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            self._write_head(sequence, entry_hash)
+            return stored
 
     def verify(self) -> AuditVerification:
         return verify_audit(self.path)

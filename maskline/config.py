@@ -52,6 +52,9 @@ class Paths:
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
     @property
+    def exports_dir(self) -> Path:
+        return self.data_dir / "exports"
+    @property
     def audit_path(self) -> Path:
         return self.root / "audit" / "audit.jsonl"
     @property
@@ -64,6 +67,7 @@ class Paths:
             self.raw_dir,
             self.out_dir,
             self.manifest_dir,
+            self.exports_dir,
             self.audit_path.parent,
             self.reports_dir,
         ):

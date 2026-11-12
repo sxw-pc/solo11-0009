@@ -11,6 +11,13 @@ from . import __version__
 from .audit import AuditLog, read_audit_entries
 from .config import Paths, SecretStore
 from .detectors.engine import detect_inventory
+from .exporter import (
+    ExportError,
+    execute_export,
+    load_export_spec,
+    spec_from_options,
+    verify_subset,
+)
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
 from .pipeline.runner import PipelineError, execute_run
@@ -57,6 +64,30 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    export = sub.add_parser(
+        "export", parents=[common],
+        help="export a filtered/pruned/sampled subset from a masked product",
+    )
+    export.add_argument("--spec", default=None, help="YAML export spec path")
+    export.add_argument("--source", default=None, help="masked product (SQLite) to export from")
+    export.add_argument("--name", default=None, help="export name (quick mode)")
+    export.add_argument("--table", action="append", default=None,
+                        help="table to include; repeatable, default: all tables")
+    export.add_argument("--where", default=None, help="row filter expression (single table)")
+    export.add_argument("--columns", default=None, help="comma-separated columns to keep")
+    export.add_argument("--exclude-columns", default=None,
+                        help="comma-separated columns to drop")
+    export.add_argument("--sample", type=float, default=None, help="sampling ratio in (0, 1]")
+    export.add_argument("--sample-seed", default=None, help="sampling seed (default: source hash)")
+    export.add_argument("--format", choices=["sqlite", "csv"], default=None,
+                        help="subset format (default: sqlite)")
+    export.add_argument("--output", default=None, help="subset output path")
+    export.add_argument("--batch-size", type=int, default=1000)
+    export_verify = sub.add_parser(
+        "export-verify", parents=[common],
+        help="verify a subset against its .export.json provenance manifest",
+    )
+    export_verify.add_argument("manifest", help="path to the .export.json manifest")
     return parser
 
 
@@ -210,6 +241,60 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    if args.spec:
+        selection_flags = [
+            args.source, args.name, args.table, args.where, args.columns,
+            args.exclude_columns, args.sample, args.sample_seed, args.format,
+            args.output,
+        ]
+        if any(flag is not None for flag in selection_flags):
+            raise MasklineError("--spec cannot be combined with selection flags")
+        spec = load_export_spec(args.spec)
+    else:
+        if not args.source:
+            raise MasklineError("--source is required when no --spec is given")
+        spec = spec_from_options(
+            source=args.source,
+            name=args.name,
+            tables=args.table,
+            where=args.where,
+            columns=args.columns,
+            exclude_columns=args.exclude_columns,
+            sample=args.sample,
+            sample_seed=args.sample_seed,
+            fmt=args.format,
+            output=args.output,
+        )
+    result = execute_export(paths, spec, batch_size=args.batch_size)
+    print(
+        f"export={result.export_id} rows={result.row_count} "
+        f"elapsed={result.elapsed_seconds:.3f}s"
+    )
+    for table, stats in sorted(result.table_stats.items()):
+        print(
+            f"  {table}: scanned={stats['scanned']} matched={stats['matched']} "
+            f"exported={stats['exported']}"
+        )
+    print(f"subset={result.subset_path} format={result.subset_format}")
+    print(f"integrity={result.subset_hash}")
+    print(f"provenance={result.provenance_path}")
+    print(f"registry={result.registry_path}")
+    print(f"audit_seq={result.audit_seq}")
+    return 0
+
+
+def _cmd_export_verify(args: argparse.Namespace) -> int:
+    details = verify_subset(args.manifest)
+    print(
+        f"subset OK: {details['subset']} format={details['format']} "
+        f"rows={details['row_count']} integrity={details['integrity'][:16]}... "
+        f"export={details['export_id']}"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -220,9 +305,14 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
+        "export": _cmd_export,
+        "export-verify": _cmd_export_verify,
     }
     try:
         return handlers[args.command](args)
+    except ExportError as exc:
+        print(f"error[{exc.code}]: {exc}", file=sys.stderr)
+        return exc.exit_code
     except (MasklineError, PolicyError, PipelineError, PseudoMapError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
