@@ -1,5 +1,5 @@
 """Sensitive-format detectors."""
 
-from .engine import DetectionResult, analyze_column
+from .engine import DetectionResult, analyze_column, detector_version
 
-__all__ = ["DetectionResult", "analyze_column"]
+__all__ = ["DetectionResult", "analyze_column", "detector_version"]

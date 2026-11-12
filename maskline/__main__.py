@@ -14,8 +14,9 @@ from .detectors.engine import detect_inventory
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
 from .pipeline.runner import PipelineError, execute_run
+from .precheck import DEFAULT_SPACE_MULTIPLIER, run_prechecks
 from .pseudomap import PseudoMap, PseudoMapError
-from .registry import inspect_dataset
+from .registry import Catalog, inspect_dataset
 from .utils import MasklineError
 from .workflow import finalize_run, needs_secret, scan_paths
 
@@ -48,6 +49,26 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--batch-size", type=int, default=1000)
     run.add_argument("--sample-limit", type=int, default=200)
     run.add_argument("--dry-run", action="store_true", help="count only; write nothing")
+    precheck = sub.add_parser(
+        "precheck", parents=[common],
+        help="read-only pre-run checks for approval gates",
+    )
+    precheck.add_argument("--dataset", required=True)
+    precheck.add_argument("--policy", required=True)
+    precheck.add_argument("--output", default=None)
+    precheck.add_argument(
+        "--space-multiplier", type=float, default=DEFAULT_SPACE_MULTIPLIER,
+        help="required free space as a multiple of the source size "
+        "(default: %(default)s)",
+    )
+    precheck.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    register = sub.add_parser(
+        "register", parents=[common],
+        help="register an approved policy fingerprint",
+    )
+    register.add_argument("--policy", required=True)
     resume = sub.add_parser("resume", parents=[common], help="resume an interrupted run")
     resume.add_argument("--run-id", required=True)
     resume.add_argument("--batch-size", type=int, default=1000)
@@ -143,6 +164,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_precheck(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    report = run_prechecks(
+        paths,
+        args.dataset,
+        args.policy,
+        output=args.output,
+        space_multiplier=args.space_multiplier,
+    )
+    print(report.to_json() if args.json else report.to_text())
+    return report.exit_code
+
+
+def _cmd_register(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    policy = load_policy(args.policy)
+    with Catalog(paths.meta_db) as catalog:
+        newly = catalog.register_policy(policy)
+    state = "registered" if newly else "already registered"
+    print(f"policy={policy.name} fingerprint={policy.fingerprint} {state}")
+    return 0
+
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     paths = _paths(args)
     store = CheckpointStore(paths.checkpoint_db)
@@ -217,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
         "demo": _cmd_demo,
         "scan": _cmd_scan,
         "run": _cmd_run,
+        "precheck": _cmd_precheck,
+        "register": _cmd_register,
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,

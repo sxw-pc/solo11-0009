@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from .audit import AuditLog, build_audit_entry
 from .config import SecretStore
 from .dataset_io import discover_datasets
-from .detectors.engine import scan_inventory
+from .detectors.engine import detector_version, scan_inventory
 from .policies import Policy
 from .registry import Catalog, DatasetInventory, inspect_dataset
 from .report import generate_report
@@ -34,9 +34,10 @@ def scan_paths(
         raise MasklineError("no supported dataset files found")
     summaries: list[ScanSummary] = []
     with Catalog(paths.meta_db) as catalog:
+        version = detector_version()
         for path in unique:
             inventory = inspect_dataset(path)
-            newly = catalog.register(inventory)
+            newly = catalog.register(inventory, detector_version=version)
             findings = scan_inventory(inventory, catalog, sample_limit=sample_limit)
             summaries.append(ScanSummary(inventory, newly, findings))
     return summaries

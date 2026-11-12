@@ -95,12 +95,13 @@ maskline/
 ├── Makefile
 ├── secret.example.txt
 ├── maskline/
-│   ├── __main__.py          # demo / scan / run / resume / reveal / audit
+│   ├── __main__.py          # demo / scan / run / precheck / register / resume / reveal / audit
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
+│   ├── precheck.py          # run 之前的只读预检（审批闸门）
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
 │   ├── pseudomap.py         # 可逆假名映射
@@ -175,6 +176,13 @@ python -m maskline run --dataset data/raw/demo.sqlite \
 # 续跑被中断的 run（run_id 在错误信息、报告或清单中）
 python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 
+# 审批通过后登记策略指纹（幂等）
+python -m maskline register --policy policies/example.yaml
+
+# 执行前预检：只读、可高频调用，退出码区分失败类别
+python -m maskline precheck --dataset data/raw/demo.sqlite \
+  --policy policies/example.yaml
+
 # 用映射库还原某个假名 token
 python -m maskline reveal --token psn_xxxxxxxx
 
@@ -183,6 +191,42 @@ python -m maskline audit --verify
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
+
+## 审批前预检（precheck）
+
+`precheck` 把 `run` 之前该确认的事一次性查清楚，供审批系统在放行前高频调用。它**绝对只读**：不创建目标库、不写断点、不碰 pseudomap 和审计链、不更新 registry，`data/` 与 `audit/` 目录在预检前后保持逐字节一致。
+
+```bash
+python -m maskline precheck --dataset data/raw/demo.sqlite \
+  --policy policies/example.yaml [--output PATH] [--space-multiplier 2.0] [--json]
+```
+
+检查项（标注 BLOCKER 的未通过会反映到退出码，WARNING 只提示）：
+
+| 检查 | 级别 | 内容 |
+|---|---|---|
+| `policy.load` / `policy.schema` | BLOCKER | 策略通过严格校验，且配置的表/列在源库中全部存在 |
+| `secret.file` / `secret.permissions` | BLOCKER | 密钥文件可读、条目齐全，且权限不是组/全局可读（POSIX 下要求 `0600`）；策略不含 hash/pseudonym 时跳过 |
+| `registry.readable` | BLOCKER | registry 能只读打开且 schema 为当前版本 |
+| `policy.registered` | BLOCKER | 策略指纹与 registry 登记记录一致（先 `maskline register` 登记） |
+| `dataset.readable` / `dataset.fingerprint` | BLOCKER | 源数据集可只读打开，且指纹相对登记时未漂移 |
+| `detector.version` | WARNING | 检测器版本与登记时一致，不一致提示重新 `scan` |
+| `target.writable` / `target.disk_space` | BLOCKER | 目标目录可写（不创建临时文件探测），且剩余空间 ≥ 源库体积 × `--space-multiplier` |
+
+退出码是位掩码，机器可直接判断失败类别，多项同时失败时按位或组合：
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 全部通过（可能仍有 WARNING） |
+| `1` | 密钥问题（未设置、不可读、权限过宽） |
+| `2` | 策略问题（校验失败、列名不存在、指纹未登记） |
+| `4` | 数据集问题（不可读、指纹漂移） |
+| `8` | 目标问题（目录不可写、磁盘空间不足） |
+| `16` | registry 问题（无法读取或 schema 过旧） |
+
+例如退出码 `5` = 密钥（1）+ 数据集（4）。`--json` 输出每项检查的 `level`（blocker/warning）与 `outcome`（pass/fail/skip），供审批系统留档。
+
+配套流程：`scan` 登记数据集指纹与检测器版本 → 审批通过后 `register` 登记策略指纹 → 执行前 `precheck` 把关 → `run`。
 
 ## 幂等、断点与安全边界
 

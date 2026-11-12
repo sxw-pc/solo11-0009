@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .dataset_io import (
     DatasetError,
@@ -22,6 +22,9 @@ from .dataset_io import (
     sqlite_table_names,
 )
 from .utils import canonical_json, normalize_sqlite_value, quote_ident
+
+if TYPE_CHECKING:
+    from .policies import Policy
 
 
 @dataclass(frozen=True)
@@ -143,7 +146,7 @@ def inspect_dataset(path: str | Path) -> DatasetInventory:
 
 
 class Catalog:
-    """Metadata database: dataset registrations and detector findings."""
+    """Metadata database: dataset registrations, detector findings, policies."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -159,7 +162,8 @@ class Catalog:
                 size_bytes INTEGER NOT NULL,
                 row_count INTEGER NOT NULL,
                 tables_json TEXT NOT NULL,
-                registered_at TEXT NOT NULL
+                registered_at TEXT NOT NULL,
+                detector_version TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS findings (
                 dataset_fingerprint TEXT NOT NULL,
@@ -175,9 +179,35 @@ class Catalog:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_fingerprint, table_name, column_name)
             );
+            CREATE TABLE IF NOT EXISTS policies (
+                fingerprint TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                registered_at TEXT NOT NULL
+            );
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring catalogs written by older versions up to the current schema."""
+        columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(datasets)")
+        }
+        if "detector_version" not in columns:
+            self.conn.execute(
+                "ALTER TABLE datasets "
+                "ADD COLUMN detector_version TEXT NOT NULL DEFAULT ''"
+            )
+
+    @classmethod
+    def open_readonly(cls, path: str | Path) -> "Catalog":
+        """Open an existing catalog read-only; never creates files or tables."""
+        instance = cls.__new__(cls)
+        instance.path = Path(path)
+        instance.conn = sqlite_connect_readonly(instance.path)
+        return instance
 
     def close(self) -> None:
         self.conn.close()
@@ -188,7 +218,7 @@ class Catalog:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def register(self, inventory: DatasetInventory) -> bool:
+    def register(self, inventory: DatasetInventory, detector_version: str = "") -> bool:
         """Insert a dataset once; return True only when it was newly registered."""
         now = _now()
         record = inventory.to_record()
@@ -199,8 +229,9 @@ class Catalog:
             return False
         self.conn.execute(
             "INSERT INTO datasets "
-            "(fingerprint, path, kind, size_bytes, row_count, tables_json, registered_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(fingerprint, path, kind, size_bytes, row_count, tables_json, "
+            "registered_at, detector_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 inventory.fingerprint,
                 record["path"],
@@ -209,10 +240,44 @@ class Catalog:
                 record["row_count"],
                 json.dumps(record["tables"], ensure_ascii=False),
                 now,
+                detector_version,
             ),
         )
         self.conn.commit()
         return True
+
+    def register_policy(self, policy: "Policy") -> bool:
+        """Record an approved policy fingerprint once; True only when new."""
+        existing = self.conn.execute(
+            "SELECT 1 FROM policies WHERE fingerprint = ?", (policy.fingerprint,)
+        ).fetchone()
+        if existing:
+            return False
+        self.conn.execute(
+            "INSERT INTO policies (fingerprint, name, path, registered_at) "
+            "VALUES (?, ?, ?, ?)",
+            (policy.fingerprint, policy.name, str(policy.source_path), _now()),
+        )
+        self.conn.commit()
+        return True
+
+    def get_policy(self, fingerprint: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM policies WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def datasets_for_path(self, path: str) -> list[dict[str, Any]]:
+        """All registrations for one dataset path, oldest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM datasets WHERE path = ? ORDER BY registered_at", (path,)
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["tables"] = json.loads(item.pop("tables_json"))
+            result.append(item)
+        return result
 
     def list_datasets(self) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT * FROM datasets ORDER BY registered_at").fetchall()

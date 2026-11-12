@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..dataset_io import read_column_samples
@@ -22,6 +24,23 @@ PRIORITY = {
     "person_name": 6,
     "address": 7,
 }
+
+
+def detector_version() -> str:
+    """Fingerprint of the detector package source.
+
+    Any change to detector logic (patterns, lexicons, checksums, scoring)
+    changes this version, so a registered dataset can be flagged for re-scan.
+    """
+    digest = hashlib.sha256(b"maskline-detectors-v1\x00")
+    package = Path(__file__).resolve().parent
+    try:
+        for source in sorted(package.glob("*.py")):
+            digest.update(source.name.encode("utf-8") + b"\x00")
+            digest.update(source.read_bytes())
+    except OSError:
+        return "unknown"
+    return digest.hexdigest()[:16]
 
 
 @dataclass(frozen=True)
