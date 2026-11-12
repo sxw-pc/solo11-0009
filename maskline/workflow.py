@@ -74,5 +74,7 @@ def finalize_run(
 ) -> dict[str, Any]:
     report_paths = generate_report(paths, inventory, policy, result, findings)
     entry = build_audit_entry(result, result.transformer_map)
-    audit_entry = AuditLog(paths.audit_path).append(entry)
+    # One run produces exactly one audit entry, even if a run is finalized
+    # again after a crash or an accidental repeat.
+    audit_entry = AuditLog(paths.audit_path).append_idempotent(entry)
     return {"report": report_paths, "audit": audit_entry}

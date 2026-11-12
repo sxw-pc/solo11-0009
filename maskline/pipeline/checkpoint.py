@@ -20,6 +20,8 @@ class RunRecord:
     status: str
     started_at: str
     updated_at: str
+    # Empty for run records written before this column existed.
+    secret_fingerprint: str = ""
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "RunRecord":
         return cls(**{key: row[key] for key in row.keys()})
@@ -42,31 +44,65 @@ class CheckpointStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id TEXT PRIMARY KEY,
-                dataset_path TEXT NOT NULL,
-                dataset_fingerprint TEXT NOT NULL,
-                policy_path TEXT NOT NULL,
-                policy_fingerprint TEXT NOT NULL,
-                output_path TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                run_id TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                last_rowid INTEGER NOT NULL,
-                rows_done INTEGER NOT NULL,
-                updated_at TEXT NOT NULL,
-                counts_json TEXT NOT NULL DEFAULT '{}',
-                PRIMARY KEY (run_id, table_name)
-            );
-            """
-        )
-        self.conn.commit()
+        # One explicit transaction: a crash midway must not leave half of
+        # the schema behind (executescript would auto-commit each CREATE).
+        self.conn.execute("BEGIN")
+        try:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    run_id TEXT PRIMARY KEY,
+                    dataset_path TEXT NOT NULL,
+                    dataset_fingerprint TEXT NOT NULL,
+                    policy_path TEXT NOT NULL,
+                    policy_fingerprint TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    secret_fingerprint TEXT NOT NULL DEFAULT ''
+                );
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    run_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    last_rowid INTEGER NOT NULL,
+                    rows_done INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    counts_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (run_id, table_name)
+                );
+                """
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            self.conn.close()
+            raise
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after older checkpoint files were written."""
+        self._ensure_column("runs", "secret_fingerprint", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("checkpoints", "counts_json", "TEXT NOT NULL DEFAULT '{}'")
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        names = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+        if column in names:
+            return
+        try:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            # Another process may have migrated the same file concurrently;
+            # the column simply has to exist afterwards.
+            self.conn.rollback()
+            names = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in names:
+                raise
 
     def close(self) -> None:
         self.conn.close()
@@ -79,11 +115,18 @@ class CheckpointStore:
 
     def create_run(self, record: RunRecord) -> None:
         self.conn.execute(
-            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO runs (
+                run_id, dataset_path, dataset_fingerprint, policy_path,
+                policy_fingerprint, output_path, status, started_at,
+                updated_at, secret_fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 record.run_id, record.dataset_path, record.dataset_fingerprint,
                 record.policy_path, record.policy_fingerprint, record.output_path,
                 record.status, record.started_at, record.updated_at,
+                record.secret_fingerprint,
             ),
         )
         self.conn.commit()
@@ -131,6 +174,19 @@ class CheckpointStore:
             (run_id, table_name),
         ).fetchone()
         return _checkpoint_from_row(row) if row else None
+
+    def delete_checkpoint(self, run_id: str, table_name: str) -> None:
+        """Drop one table checkpoint whose target rows can no longer be trusted."""
+        self.conn.execute(
+            "DELETE FROM checkpoints WHERE run_id = ? AND table_name = ?",
+            (run_id, table_name),
+        )
+        self.conn.commit()
+
+    def delete_checkpoints_for_run(self, run_id: str) -> None:
+        """Drop every checkpoint of a run, forcing a full reprocess."""
+        self.conn.execute("DELETE FROM checkpoints WHERE run_id = ?", (run_id,))
+        self.conn.commit()
 
     def list_checkpoints(self, run_id: str) -> list[TableCheckpoint]:
         rows = self.conn.execute(

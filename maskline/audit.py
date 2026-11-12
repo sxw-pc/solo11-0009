@@ -9,9 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
+from .utils import MasklineError, atomic_write_text, canonical_json, file_lock, sha256_text
 
 GENESIS_HASH = "0" * 64
+
+# Fields that legitimately differ between executions of the same run and are
+# therefore ignored when checking whether an equivalent entry already exists.
+_VOLATILE_FIELDS = frozenset({"ts", "elapsed_seconds", "seq", "prev_hash", "entry_hash"})
 
 
 class AuditError(MasklineError):
@@ -41,7 +45,44 @@ class AuditLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
+        # Serialized across processes: two concurrent appends must not
+        # interleave sequence numbers or break the hash chain.
+        with file_lock(self.lock_path):
+            return self._append_chained(entry)
+
+    def append_idempotent(
+        self, entry: dict[str, Any], key: str = "run_id"
+    ) -> dict[str, Any]:
+        """Append unless an equivalent entry for the same key already exists.
+
+        Finalizing one run must produce exactly one audit entry, no matter
+        how many times the run is resumed or finalized. Returns the stored
+        entry (the pre-existing one when this is a duplicate).
+        """
+        with file_lock(self.lock_path):
+            marker = entry.get(key)
+            if marker is not None:
+                existing = self.entry_for(key, marker)
+                if existing is not None:
+                    if _stable(existing) != _stable(entry):
+                        raise AuditError(
+                            f"conflicting audit entry already recorded for {key}={marker}"
+                        )
+                    return existing
+            return self._append_chained(entry)
+
+    def entry_for(self, key: str, value: Any) -> dict[str, Any] | None:
+        for existing in read_audit_entries(self.path):
+            if existing.get(key) == value:
+                return existing
+        return None
+
+    def _append_chained(self, entry: dict[str, Any]) -> dict[str, Any]:
         previous_hash = GENESIS_HASH
         sequence = 1
         if self.path.exists() and self.path.stat().st_size > 0:
@@ -75,6 +116,11 @@ class AuditLog:
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
             mode=0o600,
         )
+
+
+def _stable(entry: dict[str, Any]) -> dict[str, Any]:
+    """Entry content without execution-volatile fields, for equivalence checks."""
+    return {key: value for key, value in entry.items() if key not in _VOLATILE_FIELDS}
 
 
 def read_audit_entries(path: str | Path) -> list[dict[str, Any]]:

@@ -18,12 +18,14 @@ from ..transformers import TransformContext
 from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
+from .locks import RunLock
 from .manifest import write_manifest
 from .steps import (
     create_target,
     insert_batch,
     merge_counts,
     new_run_id,
+    reconcile_target_with_checkpoints,
     source_batches,
     transform_row,
 )
@@ -70,6 +72,7 @@ def _prepare_target(
     run_id: str,
     resume_run_id: str | None,
     output_path: str | Path | None,
+    secret_fingerprint: str,
 ) -> Path:
     if resume_run_id:
         record = store.get_run(run_id)
@@ -81,6 +84,11 @@ def _prepare_target(
             raise PipelineError("dataset content changed since the interrupted run")
         if record.policy_fingerprint != policy.fingerprint:
             raise PipelineError("policy changed since the interrupted run")
+        if record.secret_fingerprint and record.secret_fingerprint != secret_fingerprint:
+            raise PipelineError(
+                "secret store differs from the interrupted run; "
+                "check MASKLINE_SECRET_FILE before resuming"
+            )
         output = Path(record.output_path)
         if not output.exists():
             raise PipelineError(f"target database is missing: {output}")
@@ -98,9 +106,29 @@ def _prepare_target(
         RunRecord(
             run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
             policy.fingerprint, str(output), "running", now, now,
+            secret_fingerprint=secret_fingerprint,
         )
     )
     return output
+
+
+def _target_is_healthy(target: sqlite3.Connection) -> bool:
+    """True when the target file opens as a readable SQLite database."""
+    try:
+        target.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+    except sqlite3.DatabaseError:
+        return False
+    return True
+
+
+def _safe_set_status(store: CheckpointStore | None, run_id: str, status: str) -> None:
+    """Best-effort status update that never masks the original exception."""
+    if store is None:
+        return
+    try:
+        store.set_status(run_id, status)
+    except Exception:
+        pass
 
 
 def _process_table(
@@ -159,24 +187,57 @@ def execute_run(
     rule = policy.validate_against(inventory)
     if dry_run and resume_run_id:
         raise PipelineError("dry-run cannot be combined with resume")
+    needs_secret = _requires_secret(rule)
+    if needs_secret and secrets_store is None:
+        raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
+    uses_pseudonym = any(
+        detail.transformer == "pseudonym"
+        for table_policy in rule.tables.values()
+        for detail in table_policy.columns.values()
+    )
     started = time.monotonic()
     run_id = resume_run_id or new_run_id()
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
+    lock: RunLock | None = None
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
+            # Only one process may run in a workspace at a time; the lock is
+            # released by the OS even if this process is killed, so a crash
+            # never blocks a later resume.
+            lock = RunLock(paths.checkpoint_db)
+            lock.acquire()
             store = CheckpointStore(paths.checkpoint_db)
-            output = _prepare_target(
-                inventory, policy, paths, store, run_id, resume_run_id, output_path
+            secret_fingerprint = (
+                secrets_store.fingerprint() if needs_secret else ""
             )
-            if _requires_secret(rule):
-                if secrets_store is None:
-                    raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
+            output = _prepare_target(
+                inventory, policy, paths, store, run_id, resume_run_id,
+                output_path, secret_fingerprint,
+            )
+            rebuild = False
+            if resume_run_id and uses_pseudonym and not paths.pseudomap_db.exists():
+                # The mapping database holding the committed batches'
+                # pseudonyms is gone; those mappings cannot be recovered,
+                # so rebuild everything and regenerate them deterministically.
+                rebuild = True
+            if needs_secret:
                 mapping = PseudoMap(paths.pseudomap_db, create=True)
             target = sqlite3.connect(output)
+            if resume_run_id and not _target_is_healthy(target):
+                # The recorded target is unreadable (torn write, disk
+                # issue); rebuild it and reprocess every table.
+                rebuild = True
+            if rebuild:
+                target.close()
+                create_target(inventory, output)
+                store.delete_checkpoints_for_run(run_id)
+                target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
+            if resume_run_id:
+                reconcile_target_with_checkpoints(target, store, run_id, inventory)
             context = TransformContext(
                 secrets=secrets_store, pseudomap=mapping, write_mapping=True
             )
@@ -241,12 +302,13 @@ def execute_run(
             table_rows=table_rows, policy_changed=changed, dry_run=False,
         )
     except PipelineInterrupted:
-        if store is not None:
-            store.set_status(run_id, "interrupted")
+        _safe_set_status(store, run_id, "interrupted")
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        _safe_set_status(store, run_id, "interrupted")
         raise
     except Exception:
-        if store is not None:
-            store.set_status(run_id, "failed")
+        _safe_set_status(store, run_id, "failed")
         raise
     finally:
         if target is not None:
@@ -255,3 +317,5 @@ def execute_run(
             mapping.close()
         if store is not None:
             store.close()
+        if lock is not None:
+            lock.release()

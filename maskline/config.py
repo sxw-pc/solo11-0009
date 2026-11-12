@@ -14,7 +14,7 @@ from typing import Mapping
 
 import yaml
 
-from .utils import MasklineError, atomic_write_text
+from .utils import MasklineError, atomic_write_text, canonical_json, sha256_text
 
 
 class ConfigError(MasklineError):
@@ -120,6 +120,16 @@ class SecretStore:
             return self._values[name]
         except KeyError as exc:
             raise ConfigError(f"secret {name!r} is not defined in {self.source}") from exc
+
+    def fingerprint(self) -> str:
+        """Stable digest of the secret values, stored in run records.
+
+        Lets resume detect that the secret store changed since the
+        interrupted run (which would silently mix pseudonyms from two
+        different keys). Safe to persist: the required secrets are
+        high-entropy, so the digest cannot be brute-forced.
+        """
+        return sha256_text(canonical_json(self._values))
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._values))

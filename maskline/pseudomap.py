@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 from .utils import MasklineError
+
+# Fixed timestamp written for every mapping entry. The mapping database must
+# be byte-reproducible: a run that is interrupted and resumed has to produce
+# exactly the same mapping content as one uninterrupted run, and a wall-clock
+# timestamp would make the two diverge. The column itself is kept so mapping
+# databases written by earlier versions remain readable.
+DETERMINISTIC_CREATED_AT = "1970-01-01T00:00:00+00:00"
 
 
 class PseudoMapError(MasklineError):
@@ -71,7 +77,7 @@ class PseudoMap:
             return
         self.conn.execute(
             "INSERT INTO pseudonym_map (token, plaintext, created_at) VALUES (?, ?, ?)",
-            (token, plaintext, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            (token, plaintext, DETERMINISTIC_CREATED_AT),
         )
 
     def get(self, token: str) -> str | None:

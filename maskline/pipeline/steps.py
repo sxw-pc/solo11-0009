@@ -6,13 +6,16 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, TYPE_CHECKING
 
 from ..dataset_io import iter_csv_tuples, iter_table_rows, sqlite_schema_sql
 from ..registry import DatasetInventory, TableInfo
 from ..transformers import REGISTRY, TransformContext
 from ..utils import quote_ident
 from .errors import PipelineError
+
+if TYPE_CHECKING:
+    from .checkpoint import CheckpointStore
 
 
 def new_run_id() -> str:
@@ -59,31 +62,93 @@ def source_batches(
         cursor = batch[-1][0]
 
 
+def table_creation_sql(
+    inventory: DatasetInventory,
+    table: TableInfo,
+    schemas: dict[str, str] | None = None,
+) -> str:
+    """CREATE TABLE statement for one target table, copied from the source."""
+    if inventory.kind == "sqlite":
+        if schemas is None:
+            schemas = sqlite_schema_sql(inventory.path)
+        sql = schemas.get(table.name)
+        if not sql:
+            raise PipelineError(f"cannot copy schema for table {table.name!r}")
+        return sql
+    definitions = ", ".join(
+        f"{quote_ident(column.name)} TEXT" for column in table.columns
+    )
+    return f"CREATE TABLE {quote_ident(table.name)} ({definitions})"
+
+
 def create_target(inventory: DatasetInventory, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in ("", "-wal", "-shm"):
+    # Remove stale sidecars too, so a leftover journal from a crashed run
+    # never has to be reconciled against the freshly created database.
+    for suffix in ("", "-wal", "-shm", "-journal"):
         candidate = Path(str(output) + suffix)
         if candidate.exists():
             candidate.unlink()
     conn = sqlite3.connect(output)
     try:
         conn.execute("PRAGMA journal_mode=DELETE")
-        if inventory.kind == "sqlite":
-            schemas = sqlite_schema_sql(inventory.path)
-            for table in inventory.tables:
-                sql = schemas.get(table.name)
-                if not sql:
-                    raise PipelineError(f"cannot copy schema for table {table.name!r}")
-                conn.execute(sql)
-        else:
-            for table in inventory.tables:
-                definitions = ", ".join(
-                    f"{quote_ident(column.name)} TEXT" for column in table.columns
-                )
-                conn.execute(f"CREATE TABLE {quote_ident(table.name)} ({definitions})")
+        schemas = sqlite_schema_sql(inventory.path) if inventory.kind == "sqlite" else None
+        for table in inventory.tables:
+            conn.execute(table_creation_sql(inventory, table, schemas))
         conn.commit()
     finally:
         conn.close()
+
+
+def reconcile_target_with_checkpoints(
+    target: sqlite3.Connection,
+    store: "CheckpointStore",
+    run_id: str,
+    inventory: DatasetInventory,
+) -> None:
+    """Bring a resumable target database back in line with its checkpoints.
+
+    A crash can leave the target ahead of the checkpoint database (batch
+    committed, checkpoint not yet saved) or — for artifacts of older
+    versions — behind it. Afterwards every checkpointed table holds exactly
+    the rows its checkpoint describes, so replaying the remaining batches
+    reproduces a full uninterrupted run. Every operation here is
+    idempotent: if the process dies mid-reconcile, the next resume simply
+    reconciles again.
+    """
+    existing = {
+        row[0]
+        for row in target.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    for table in inventory.tables:
+        quoted = quote_ident(table.name)
+        if table.name not in existing:
+            # The target lost a table (e.g. crash during schema creation of
+            # an older version); recreate it and reprocess from scratch.
+            target.execute(table_creation_sql(inventory, table))
+            store.delete_checkpoint(run_id, table.name)
+            continue
+        checkpoint = store.get_checkpoint(run_id, table.name)
+        if checkpoint is None:
+            # Rows without a checkpoint are stragglers from a batch that
+            # committed before its checkpoint was saved; drop them.
+            target.execute(f"DELETE FROM {quoted}")
+            continue
+        target.execute(
+            f"DELETE FROM {quoted} WHERE rowid > ?", (checkpoint.last_rowid,)
+        )
+        count = int(
+            target.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+        )
+        if count != checkpoint.rows_done:
+            # The committed prefix diverges from the checkpoint; neither the
+            # rows nor the stored counts can be trusted, so rebuild the
+            # table from scratch on this resume.
+            target.execute(f"DELETE FROM {quoted}")
+            store.delete_checkpoint(run_id, table.name)
+    target.commit()
 
 
 def transform_row(
