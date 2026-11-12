@@ -14,6 +14,7 @@ from .detectors.engine import detect_inventory
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
 from .pipeline.runner import PipelineError, execute_run
+from .policygen import generate_policy_draft
 from .pseudomap import PseudoMap, PseudoMapError
 from .registry import inspect_dataset
 from .utils import MasklineError
@@ -41,6 +42,16 @@ def _parser() -> argparse.ArgumentParser:
     scan = sub.add_parser("scan", parents=[common], help="register datasets and detect columns")
     scan.add_argument("target", nargs="?", default="data/raw", help="file or directory")
     scan.add_argument("--sample-limit", type=int, default=200)
+    genpolicy = sub.add_parser(
+        "genpolicy", parents=[common],
+        help="generate a policy draft from the latest scan findings",
+    )
+    genpolicy.add_argument("--dataset", required=True, help="dataset file to draft a policy for")
+    genpolicy.add_argument("--output", required=True, help="policy draft YAML to write")
+    genpolicy.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing output file (a timestamped backup is kept)",
+    )
     run = sub.add_parser("run", parents=[common], help="mask a dataset with a policy")
     run.add_argument("--dataset", required=True)
     run.add_argument("--policy", required=True)
@@ -96,6 +107,25 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     paths = _paths(args)
     summaries = scan_paths([args.target], paths, sample_limit=args.sample_limit)
     _print_scan(summaries)
+    return 0
+
+
+def _cmd_genpolicy(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    result = generate_policy_draft(
+        Path(args.dataset).expanduser().resolve(),
+        Path(args.output).expanduser().resolve(),
+        paths,
+        force=args.force,
+    )
+    print(
+        f"draft={result.output_path} tables={result.table_count} "
+        f"columns={result.column_count} todo={result.confirm_count}"
+    )
+    if result.backup_path is not None:
+        print(f"backup={result.backup_path}")
+    if result.confirm_count:
+        print("review the TODO(confirm) columns before using this draft")
     return 0
 
 
@@ -216,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "demo": _cmd_demo,
         "scan": _cmd_scan,
+        "genpolicy": _cmd_genpolicy,
         "run": _cmd_run,
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,

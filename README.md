@@ -95,7 +95,7 @@ maskline/
 ├── Makefile
 ├── secret.example.txt
 ├── maskline/
-│   ├── __main__.py          # demo / scan / run / resume / reveal / audit
+│   ├── __main__.py          # demo / scan / genpolicy / run / resume / reveal / audit
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
@@ -136,6 +136,17 @@ export MASKLINE_SECRET_FILE=~/maskline-secret.txt
 
 文件格式见 `secret.example.txt`。两个值必须独立且至少 16 个字符。代码和策略只引用密钥名（如 `hmac_salt`），不包含密钥本身。丢失密钥会导致 HMAC 结果无法重现。
 
+## 从发现结果生成策略草稿
+
+`genpolicy` 读取某个数据集最近一次 `scan` 的发现，生成可直接执行的策略草稿：
+
+- 高置信度列按发现类型落成具体变换（映射约定与 `policies/example.yaml` 一致）；
+- 中置信度列同样落成具体变换，但带 `review:` 注释提醒复核；
+- 低置信度（或未知发现类型）列默认最保守的 `nullify`，行内标注 `TODO(confirm)`；
+- 没有发现的列与表不会写进草稿。
+
+输出是确定性的：同一份发现结果生成两次，文件逐字节一致；表与列按名称排序，便于评审 diff。目标文件已存在时默认拒绝覆盖，`--force` 覆盖前会把旧文件备份为 `<文件名>.<UTC 时间戳>.bak`，手工修改不会被静默吞掉。草稿不做任何修改即可直接交给 `run` 执行。
+
 ## 最小策略示例
 
 ```yaml
@@ -163,6 +174,11 @@ datasets:
 ```bash
 # 扫描目录或单个文件，登记并输出高/中置信度发现
 python -m maskline scan data/raw
+
+# 依据最近一次扫描发现生成策略草稿（确定性输出；已存在时需 --force，
+# 覆盖前自动备份为带时间戳的 .bak 副本）
+python -m maskline genpolicy --dataset data/raw/demo.sqlite \
+  --output policies/demo.draft.yaml
 
 # 执行脱敏，写出独立目标库、报告与审计
 python -m maskline run --dataset data/raw/demo.sqlite \
