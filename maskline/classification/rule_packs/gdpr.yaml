@@ -1,0 +1,142 @@
+# 内置合规规则包：欧盟通用数据保护条例 (GDPR)
+# 规则包为离线静态文件，运行期不访问任何外部合规库。
+version: 1
+pack_id: gdpr-builtin
+revision: 1
+standard:
+  code: gdpr
+  name: General Data Protection Regulation
+  version: "Regulation (EU) 2016/679"
+  description: 基于 GDPR personal data / special category / cross-border 处理思路整理的通用分级规则，非法律意见。
+level_order: [L1, L2, L3, L4]
+level_names:
+  L1: Non-personal data
+  L2: Personal data
+  L3: High-risk personal data
+  L4: Special category data
+defaults:
+  fallback_level: L2
+  fallback_category: Unmapped personal data
+  fallback_controls: [lawful-basis, access-control, data-minimization]
+controls_catalog:
+  encryption-at-rest: Encryption at rest
+  lawful-basis: Lawful basis for processing
+  explicit-consent: Explicit consent (Art.9)
+  access-control: Access control
+  dpia: Data protection impact assessment
+  pseudonymization: Pseudonymization (Art.4(5))
+  masking: Masking
+  hashing: Salted hashing
+  generalization: Generalization
+  data-minimization: Data minimization
+  retention-limit: Storage limitation
+  scc-transfer-safeguard: Chapter V transfer safeguard
+cross_border_name_patterns:
+  - ip
+  - ip_address
+  - client_ip
+  - email
+  - "*country*"
+  - "*region*"
+  - nationality
+  - timezone
+  - locale
+aliases:
+  - canonical: mobile_phone
+    names: [tel, telephone]
+  - canonical: email
+    names: [email_addr]
+rules:
+  - id: gdpr-health
+    priority: 90
+    match:
+      sensitive_types: []
+      name_patterns: ["*health*", "*medical*", "*病史*", "*健康*", "*体检*"]
+    labels:
+      level: L4
+      category: Special category - health data (Art.9)
+      controls: [explicit-consent, encryption-at-rest, access-control, dpia]
+    special_category: true
+  - id: gdpr-id-card
+    priority: 100
+    match:
+      sensitive_types: [id_card]
+      name_patterns: [id_card, idcard, identity_no, cert_no, "*身份证*"]
+    labels:
+      level: L3
+      category: High-risk identification data
+      controls: [encryption-at-rest, lawful-basis, access-control, dpia, pseudonymization]
+  - id: gdpr-bank-card
+    priority: 100
+    match:
+      sensitive_types: [bank_card]
+      name_patterns: [bank_card, card_no, account_no, "*银行卡*", "*账户*"]
+    labels:
+      level: L3
+      category: High-risk financial data
+      controls: [encryption-at-rest, lawful-basis, access-control, masking]
+  - id: gdpr-mobile
+    priority: 100
+    match:
+      sensitive_types: [mobile_phone]
+      name_patterns: [mobile, phone, mobile_phone, contact_phone, cellphone]
+    labels:
+      level: L3
+      category: Personal data - contact identifier
+      controls: [lawful-basis, access-control, masking, data-minimization]
+  - id: gdpr-ipv4
+    priority: 100
+    match:
+      sensitive_types: [ipv4]
+      name_patterns: [ip, ip_address, client_ip]
+    labels:
+      level: L3
+      category: Personal data - online identifier
+      controls: [lawful-basis, access-control, masking, scc-transfer-safeguard]
+    cross_border_flag: true
+  - id: gdpr-address
+    priority: 100
+    match:
+      sensitive_types: [address]
+      name_patterns: [address, addr, home_address]
+    labels:
+      level: L2
+      category: Personal data - location/contact
+      controls: [lawful-basis, access-control, generalization]
+  - id: gdpr-birth-date
+    priority: 80
+    match:
+      sensitive_types: []
+      name_patterns: [birth_date, birthday, dob, "*出生*"]
+    labels:
+      level: L2
+      category: Personal data - identity characteristic
+      controls: [lawful-basis, generalization]
+  - id: gdpr-email
+    priority: 100
+    match:
+      sensitive_types: [email]
+      name_patterns: [email, mail]
+    labels:
+      level: L2
+      category: Personal data - online identifier
+      controls: [lawful-basis, access-control, hashing, scc-transfer-safeguard]
+    cross_border_flag: true
+  - id: gdpr-person-name
+    priority: 100
+    match:
+      sensitive_types: [person_name]
+      name_patterns: [full_name, name, contact_name, user_name, person_name]
+    labels:
+      level: L2
+      category: Personal data - identity
+      controls: [lawful-basis, access-control, pseudonymization]
+  - id: gdpr-credit-code
+    priority: 100
+    match:
+      sensitive_types: [credit_code]
+      name_patterns: [credit_code, company_code, org_code]
+    labels:
+      level: L1
+      category: Non-personal data (organization)
+      controls: [retention-limit]

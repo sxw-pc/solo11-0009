@@ -15,6 +15,7 @@
 **是：**
 
 - 本地数据集的敏感字段发现引擎（正则 + 校验位 + 中文词典启发）
+- 敏感字段合规分级映射：PIPL / GB/T 35273 / GDPR 三套离线规则包，自动标注合规等级、数据类别、管控要求（见 [docs/classification.md](docs/classification.md)）
 - 基于 YAML 的声明式脱敏策略执行器
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
@@ -99,6 +100,15 @@ maskline/
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
+│   ├── classification/      # 合规分级：版本化规则包、匹配引擎、语义归一、不可篡改修正
+│   │   ├── rule_packs/      # 三套内置标准规则包（pipl / gbt35273 / gdpr，离线 YAML）
+│   │   ├── rulepacks.py     # 规则包严格校验与内容指纹
+│   │   ├── engine.py        # 规则匹配、冲突告警、同语义统一分级
+│   │   ├── semantic.py      # 同义异名字段语义归一
+│   │   ├── tolerant.py      # 无表头/深嵌套降级处理
+│   │   ├── store.py         # 追加式规则版本与修正哈希链
+│   │   ├── service.py       # 分级作业、人工修正、指纹变更重分级
+│   │   └── policy_export.py # 分级结果 -> v1 脱敏策略 YAML
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
@@ -180,6 +190,17 @@ python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
+
+# 合规分级：自动发布内置规则包并给字段打等级/类别/管控标签
+python -m maskline classify run data/raw
+# 查看规则版本、人工修正、校验修正链、指纹变更重分级
+python -m maskline classify packs
+python -m maskline classify correct --fingerprint <fp> --table t --column c \
+  --standard pipl --level L4 --reason "评审上调" --operator alice
+python -m maskline classify verify
+python -m maskline classify reclassify
+# 分级结果直接导出现有规则配置模块可引用的脱敏策略
+python -m maskline classify export <fp> --output policies/generated/derived.yaml
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。

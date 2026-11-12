@@ -110,6 +110,31 @@ def iter_csv_tuples(path: Path) -> Iterator[tuple[str, ...]]:
             yield tuple(row[: len(header)])
 
 
+def iter_headerless_csv_tuples(path: Path) -> Iterator[tuple[str, ...]]:
+    """Yield every row of a CSV that has no header line (all rows are data)."""
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.reader(fh)
+        for row in reader:
+            if not row:
+                continue
+            yield tuple(row)
+
+
+def read_headerless_column_samples(
+    path: Path, column_index: int, limit: int
+) -> list[Any]:
+    """Sample one column of a headerless CSV by zero-based column position."""
+    if limit < 1:
+        raise ValueError("sample limit must be positive")
+    rows: list[Any] = []
+    for row in iter_headerless_csv_tuples(path):
+        if column_index < len(row) and row[column_index] is not None:
+            rows.append(row[column_index])
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def iter_table_rows(
     path: Path, table: str, after_rowid: int = 0, limit: int | None = None
 ) -> tuple[list[str], list[tuple[int, tuple[Any, ...]]]]:

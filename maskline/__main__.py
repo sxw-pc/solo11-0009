@@ -18,6 +18,10 @@ from .pseudomap import PseudoMap, PseudoMapError
 from .registry import inspect_dataset
 from .utils import MasklineError
 from .workflow import finalize_run, needs_secret, scan_paths
+from .classification.cli import build_classify_parser, handle_classify
+from .classification.rulepacks import RulePackError
+from .classification.service import ClassificationServiceError
+from .classification.store import ClassificationStoreError
 
 
 def _common() -> argparse.ArgumentParser:
@@ -57,6 +61,7 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    build_classify_parser(sub)
     return parser
 
 
@@ -220,10 +225,20 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
+        "classify": handle_classify,
     }
     try:
         return handlers[args.command](args)
-    except (MasklineError, PolicyError, PipelineError, PseudoMapError, FileNotFoundError) as exc:
+    except (
+        MasklineError,
+        PolicyError,
+        PipelineError,
+        PseudoMapError,
+        ClassificationServiceError,
+        ClassificationStoreError,
+        RulePackError,
+        FileNotFoundError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

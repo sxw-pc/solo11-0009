@@ -21,6 +21,9 @@ maskline = "maskline.__main__:main"
 [tool.setuptools.packages.find]
 include = ["maskline*"]
 
+[tool.setuptools.package-data]
+"maskline.classification" = ["rule_packs/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

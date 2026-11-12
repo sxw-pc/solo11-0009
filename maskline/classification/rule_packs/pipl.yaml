@@ -1,0 +1,147 @@
+# 内置合规规则包：《中华人民共和国个人信息保护法》(PIPL)
+# 规则包为离线静态文件，运行期不访问任何外部合规库。
+version: 1
+pack_id: pipl-builtin
+revision: 1
+standard:
+  code: pipl
+  name: 中华人民共和国个人信息保护法
+  version: "2021"
+  description: 基于 PIPL 个人信息/敏感个人信息分类思路整理的通用分级规则，非法律意见。
+level_order: [L1, L2, L3, L4]
+level_names:
+  L1: 非个人信息/组织信息
+  L2: 一般个人信息（常规风险）
+  L3: 一般个人信息（较高风险）
+  L4: 敏感个人信息
+defaults:
+  fallback_level: L2
+  fallback_category: 未明确映射的个人信息
+  fallback_controls: [access-control, minimize-collection]
+controls_catalog:
+  encryption-at-rest: 静态加密
+  separate-consent: 单独同意
+  access-control: 访问控制
+  pipl-impact-assessment: 个人信息保护影响评估
+  de-identification: 去标识化
+  masking: 遮蔽展示
+  hashing: 加盐哈希
+  pseudonymization: 假名化
+  generalization: 泛化处理
+  minimize-collection: 最小必要采集
+  retention-limit: 留存期限管理
+  cross-border-assessment: 出境安全评估
+# 命中以下名称模式的字段，无论是否命中具体规则，都标记为跨境传输相关
+cross_border_name_patterns:
+  - ip
+  - ip_address
+  - client_ip
+  - email
+  - "*country*"
+  - "*region*"
+  - nationality
+  - timezone
+  - locale
+  - "*国家*"
+  - "*地区*"
+aliases:
+  - canonical: mobile_phone
+    names: [tel, telephone, 联系电话, 移动电话]
+  - canonical: email
+    names: [email_addr, 电子邮箱]
+rules:
+  - id: pipl-id-card
+    priority: 100
+    match:
+      sensitive_types: [id_card]
+      name_patterns: [id_card, idcard, identity_no, cert_no, "*身份证*"]
+    labels:
+      level: L4
+      category: 敏感个人信息-身份信息
+      controls: [encryption-at-rest, separate-consent, access-control, pipl-impact-assessment, de-identification]
+    special_category: true
+  - id: pipl-bank-card
+    priority: 100
+    match:
+      sensitive_types: [bank_card]
+      name_patterns: [bank_card, card_no, account_no, "*银行卡*", "*账户*"]
+    labels:
+      level: L4
+      category: 敏感个人信息-金融账户
+      controls: [encryption-at-rest, separate-consent, access-control, masking]
+    special_category: true
+  - id: pipl-health
+    priority: 90
+    match:
+      sensitive_types: []
+      name_patterns: ["*health*", "*medical*", "*病史*", "*健康*", "*体检*"]
+    labels:
+      level: L4
+      category: 敏感个人信息-医疗健康
+      controls: [separate-consent, encryption-at-rest, access-control]
+    special_category: true
+  - id: pipl-mobile
+    priority: 100
+    match:
+      sensitive_types: [mobile_phone]
+      name_patterns: [mobile, phone, mobile_phone, contact_phone, cellphone, "*手机*", "*电话*"]
+    labels:
+      level: L3
+      category: 一般个人信息-联系方式
+      controls: [access-control, masking, minimize-collection]
+  - id: pipl-address
+    priority: 100
+    match:
+      sensitive_types: [address]
+      name_patterns: [address, addr, home_address, "*地址*", "*住址*"]
+    labels:
+      level: L3
+      category: 一般个人信息-联系地址/行踪信息
+      controls: [access-control, generalization]
+  - id: pipl-ipv4
+    priority: 100
+    match:
+      sensitive_types: [ipv4]
+      name_patterns: [ip, ip_address, client_ip, "*ip地址*"]
+    labels:
+      level: L3
+      category: 一般个人信息-网络身份标识
+      controls: [access-control, masking, cross-border-assessment]
+    cross_border_flag: true
+  - id: pipl-birth-date
+    priority: 80
+    match:
+      sensitive_types: []
+      name_patterns: [birth_date, birthday, dob, "*出生*"]
+    labels:
+      level: L3
+      category: 一般个人信息-身份特征
+      controls: [generalization, access-control]
+  - id: pipl-email
+    priority: 100
+    match:
+      sensitive_types: [email]
+      name_patterns: [email, mail, "*邮箱*", "*电子邮件*"]
+    labels:
+      level: L2
+      category: 一般个人信息-网络标识
+      controls: [access-control, hashing]
+    cross_border_flag: true
+  - id: pipl-person-name
+    priority: 100
+    match:
+      sensitive_types: [person_name]
+      name_patterns: [full_name, name, contact_name, user_name, person_name, "*姓名*"]
+    labels:
+      level: L2
+      category: 一般个人信息-身份标识
+      controls: [access-control, pseudonymization]
+  - id: pipl-credit-code
+    priority: 100
+    match:
+      sensitive_types: [credit_code]
+      name_patterns: [credit_code, company_code, org_code, "*统一社会信用代码*"]
+    labels:
+      level: L1
+      category: 组织信息（非自然人个人信息）
+      controls: [retention-limit]

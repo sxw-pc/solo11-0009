@@ -43,6 +43,12 @@ class Paths:
     def meta_db(self) -> Path:
         return self.data_dir / "meta.sqlite"
     @property
+    def classification_db(self) -> Path:
+        return self.data_dir / "classification.sqlite"
+    @property
+    def generated_policies_dir(self) -> Path:
+        return self.root / "policies" / "generated"
+    @property
     def checkpoint_db(self) -> Path:
         return self.data_dir / "checkpoints.sqlite"
     @property
@@ -66,6 +72,7 @@ class Paths:
             self.manifest_dir,
             self.audit_path.parent,
             self.reports_dir,
+            self.generated_policies_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

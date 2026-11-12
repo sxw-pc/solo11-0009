@@ -1,0 +1,146 @@
+# 内置合规规则包：GB/T 35273-2020《信息安全技术 个人信息安全规范》
+# 规则包为离线静态文件，运行期不访问任何外部合规库。
+version: 1
+pack_id: gbt35273-builtin
+revision: 1
+standard:
+  code: gbt35273
+  name: 信息安全技术 个人信息安全规范
+  version: GB/T 35273-2020
+  description: 基于个人信息安全规范的个人信息/个人敏感信息划分整理的通用分级规则，非认证结论。
+level_order: [L1, L2, L3, L4]
+level_names:
+  L1: 非个人信息
+  L2: 个人信息
+  L3: 个人信息（较高敏感）
+  L4: 个人敏感信息
+defaults:
+  fallback_level: L2
+  fallback_category: 未明确映射的个人信息
+  fallback_controls: [access-control, minimize-collection]
+controls_catalog:
+  encryption-at-rest: 静态加密
+  explicit-consent: 明示同意
+  access-control: 访问控制
+  pia: 个人信息安全影响评估
+  de-identification: 去标识化
+  masking: 遮蔽展示
+  hashing: 加盐哈希
+  pseudonymization: 假名化
+  generalization: 泛化处理
+  minimize-collection: 最小化收集
+  retention-limit: 留存期限管理
+  cross-border-record: 出境记录与评估
+cross_border_name_patterns:
+  - ip
+  - ip_address
+  - client_ip
+  - email
+  - "*country*"
+  - "*region*"
+  - nationality
+  - timezone
+  - locale
+  - "*国家*"
+  - "*地区*"
+aliases:
+  - canonical: mobile_phone
+    names: [tel, telephone, 联系电话, 移动电话]
+  - canonical: email
+    names: [email_addr, 电子邮箱]
+rules:
+  - id: gbt-id-card
+    priority: 100
+    match:
+      sensitive_types: [id_card]
+      name_patterns: [id_card, idcard, identity_no, cert_no, "*身份证*"]
+    labels:
+      level: L4
+      category: 个人敏感信息-个人身份信息
+      controls: [encryption-at-rest, explicit-consent, access-control, pia, de-identification]
+    special_category: true
+  - id: gbt-bank-card
+    priority: 100
+    match:
+      sensitive_types: [bank_card]
+      name_patterns: [bank_card, card_no, account_no, "*银行卡*", "*账户*"]
+    labels:
+      level: L4
+      category: 个人敏感信息-个人财产信息
+      controls: [encryption-at-rest, explicit-consent, access-control, masking]
+    special_category: true
+  - id: gbt-health
+    priority: 90
+    match:
+      sensitive_types: []
+      name_patterns: ["*health*", "*medical*", "*病史*", "*健康*", "*体检*"]
+    labels:
+      level: L4
+      category: 个人敏感信息-个人健康生理信息
+      controls: [explicit-consent, encryption-at-rest, access-control]
+    special_category: true
+  - id: gbt-mobile
+    priority: 100
+    match:
+      sensitive_types: [mobile_phone]
+      name_patterns: [mobile, phone, mobile_phone, contact_phone, cellphone, "*手机*", "*电话*"]
+    labels:
+      level: L3
+      category: 个人信息-联系方式
+      controls: [access-control, masking, minimize-collection]
+  - id: gbt-address
+    priority: 100
+    match:
+      sensitive_types: [address]
+      name_patterns: [address, addr, home_address, "*地址*", "*住址*"]
+    labels:
+      level: L3
+      category: 个人信息-联系地址
+      controls: [access-control, generalization]
+  - id: gbt-ipv4
+    priority: 100
+    match:
+      sensitive_types: [ipv4]
+      name_patterns: [ip, ip_address, client_ip, "*ip地址*"]
+    labels:
+      level: L3
+      category: 个人信息-网络身份标识
+      controls: [access-control, masking, cross-border-record]
+    cross_border_flag: true
+  - id: gbt-birth-date
+    priority: 80
+    match:
+      sensitive_types: []
+      name_patterns: [birth_date, birthday, dob, "*出生*"]
+    labels:
+      level: L3
+      category: 个人信息-身份特征
+      controls: [generalization, access-control]
+  - id: gbt-email
+    priority: 100
+    match:
+      sensitive_types: [email]
+      name_patterns: [email, mail, "*邮箱*", "*电子邮件*"]
+    labels:
+      level: L2
+      category: 个人信息-网络身份标识
+      controls: [access-control, hashing]
+    cross_border_flag: true
+  - id: gbt-person-name
+    priority: 100
+    match:
+      sensitive_types: [person_name]
+      name_patterns: [full_name, name, contact_name, user_name, person_name, "*姓名*"]
+    labels:
+      level: L2
+      category: 个人信息-个人基本资料
+      controls: [access-control, pseudonymization]
+  - id: gbt-credit-code
+    priority: 100
+    match:
+      sensitive_types: [credit_code]
+      name_patterns: [credit_code, company_code, org_code, "*统一社会信用代码*"]
+    labels:
+      level: L1
+      category: 非个人信息（组织信息）
+      controls: [retention-limit]
