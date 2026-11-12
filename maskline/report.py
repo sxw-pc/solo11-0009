@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import Paths
 from .dataset_io import iter_csv_tuples, iter_table_rows
+from .drift import DRIFT_TYPE_LABELS, SEVERITY_LABELS, DriftRecord
 from .policies import DatasetRule, Policy
 from .registry import DatasetInventory, TableInfo
 from .utils import atomic_write_text, quote_ident, sqlite_connect_readonly
@@ -107,6 +108,75 @@ def _cell(value: Any) -> str:
     return text if text != "" else '""'
 
 
+def _drift_side(view: dict[str, Any] | None) -> str:
+    if not view:
+        return "—"
+    sensitive_type = view.get("sensitive_type") or "—"
+    confidence = CONFIDENCE_LABELS.get(view.get("confidence", "none"), view.get("confidence", "none"))
+    return (
+        f"{sensitive_type} / {confidence} / "
+        f"{float(view.get('hit_rate', 0.0)):.1%}"
+    )
+
+
+def _drift_markdown(drift: DriftRecord) -> list[str]:
+    payload = drift.to_report_dict()
+    lines = [
+        "## 跨版本漂移检测",
+        "",
+        f"- 基线版本：`{payload['baseline_fingerprint']}`",
+        f"- 当前版本：`{payload['current_fingerprint']}`",
+        f"- 基线登记时间：{payload.get('baseline_registered_at') or '—'}",
+        f"- 命中率容差：{float(payload['hit_rate_tolerance']):.2%}",
+        f"- 忽略规则指纹：`{payload.get('ignore_rules_fingerprint') or '—'}`",
+        f"- 审计条目：seq={payload['audit_seq']} "
+        f"hash=`{payload['audit_entry_hash']}`",
+        f"- 漂移数量：{payload['summary'].get('total', 0)}；"
+        f"已忽略：{payload['summary'].get('ignored', 0)}",
+        "",
+    ]
+    if payload["drifts"]:
+        lines.extend(
+            [
+                "| 漂移类型 | 严重度 | 表 | 列 | 之前类型/置信度/命中率 | "
+                "之后类型/置信度/命中率 | 命中率变化 |",
+                "|---|---|---|---|---|---|---:|",
+            ]
+        )
+        for item in payload["drifts"]:
+            delta = item.get("hit_rate_delta")
+            delta_text = "—" if delta is None else f"{float(delta):+.1%}"
+            lines.append(
+                f"| {DRIFT_TYPE_LABELS.get(item['drift_type'], item['drift_type'])} | "
+                f"{SEVERITY_LABELS.get(item['severity'], item['severity'])} | "
+                f"{_cell(item['table'])} | {_cell(item['column'])} | "
+                f"{_drift_side(item.get('baseline'))} | "
+                f"{_drift_side(item.get('current'))} | {delta_text} |"
+            )
+    else:
+        lines.append("未发现需要告警的漂移。")
+    if payload["ignored_drifts"]:
+        lines.extend(
+            [
+                "",
+                "### 已忽略漂移",
+                "",
+                "| 漂移类型 | 表 | 列 | 忽略原因 |",
+                "|---|---|---|---|",
+            ]
+        )
+        for item in payload["ignored_drifts"]:
+            lines.append(
+                f"| {DRIFT_TYPE_LABELS.get(item['drift_type'], item['drift_type'])} | "
+                f"{_cell(item['table'])} | {_cell(item['column'])} | "
+                f"{_cell(item.get('ignore_reason') or '—')} |"
+            )
+    lines.append("")
+    lines.append("> 本对比仅读取登记库中已保存的发现结果与结构快照，全程离线，未读取或上传数据集内容。")
+    lines.append("")
+    return lines
+
+
 def _markdown(
     inventory: DatasetInventory,
     policy: Policy,
@@ -114,6 +184,7 @@ def _markdown(
     findings: list[dict[str, Any]],
     samples: dict[str, list[dict[str, Any]]],
     warnings: list[dict[str, Any]],
+    drift: DriftRecord | None = None,
 ) -> str:
     rule = policy.for_dataset(inventory.path)
     applied = {
@@ -153,6 +224,9 @@ def _markdown(
             f"{finding['score']:.3f} | {finding['hit_rate']:.1%} | "
             f"{finding['validate_rate']:.1%} | {configured} |"
         )
+    if drift is not None:
+        lines.append("")
+        lines.extend(_drift_markdown(drift))
     lines.extend(
         [
             "",
@@ -232,6 +306,7 @@ def generate_report(
     policy: Policy,
     result: Any,
     findings: list[dict[str, Any]],
+    drift: DriftRecord | None = None,
 ) -> dict[str, Path]:
     if result.output_path is None:
         raise ValueError("dry-run results do not produce reports")
@@ -268,12 +343,13 @@ def generate_report(
         "findings": findings,
         "samples": samples,
         "warnings": warnings,
+        "drift": drift.to_report_dict() if drift is not None else None,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     paths.reports_dir.mkdir(parents=True, exist_ok=True)
     json_path = paths.reports_dir / f"{result.run_id}.json"
     md_path = paths.reports_dir / f"{result.run_id}.md"
     atomic_write_text(json_path, json.dumps(report_core, ensure_ascii=False, indent=2) + "\n")
-    markdown = _markdown(inventory, policy, result, findings, samples, warnings)
+    markdown = _markdown(inventory, policy, result, findings, samples, warnings, drift)
     atomic_write_text(md_path, markdown)
     return {"markdown": md_path, "json": json_path}
