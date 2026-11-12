@@ -142,6 +142,7 @@ def build_audit_entry(
 ) -> dict[str, Any]:
     """Turn a RunResult plus applied columns into one audit record."""
     entry: dict[str, Any] = {
+        "event": "run_completed",
         "run_id": result.run_id,
         "dataset_path": str(result.dataset_path),
         "dataset_fingerprint": result.dataset_fingerprint,
@@ -152,6 +153,9 @@ def build_audit_entry(
         "transform_counts": result.transform_counts,
         "output_path": str(result.output_path) if result.output_path else None,
         "output_hash": result.output_hash,
+        "checksum_mode": getattr(result, "checksum_mode", ""),
+        "pseudomap_count": getattr(result, "pseudomap_count", None),
+        "pseudomap_digest": getattr(result, "pseudomap_digest", None),
         "elapsed_seconds": round(result.elapsed_seconds, 6),
     }
     if extra:

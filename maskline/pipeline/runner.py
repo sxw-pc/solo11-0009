@@ -11,11 +11,19 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Paths, SecretStore
+from ..integrity import (
+    CHECKSUM_HMAC,
+    CHECKSUM_PLAIN,
+    StreamChecksum,
+    batch_checksum_header,
+    derive_verify_key,
+    pseudomap_checksum_header,
+)
 from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
 from ..registry import DatasetInventory, TableInfo
 from ..transformers import TransformContext
-from ..utils import sqlite_content_digest
+from ..utils import quote_ident, sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
 from .manifest import write_manifest
@@ -45,6 +53,9 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    checksum_mode: str = ""
+    pseudomap_count: int | None = None
+    pseudomap_digest: str | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -103,6 +114,24 @@ def _prepare_target(
     return output
 
 
+def _read_back_batch(
+    conn: sqlite3.Connection, table: TableInfo, first_rowid: int, last_rowid: int
+) -> list[tuple[int, tuple[Any, ...]]]:
+    """Read the just-inserted rows back from the target, exactly as stored.
+
+    Checksums are computed over the stored representation (after SQLite type
+    affinity), so the verify command can recompute them from the target
+    database alone.
+    """
+    select_cols = ", ".join(quote_ident(column.name) for column in table.columns)
+    cursor = conn.execute(
+        f"SELECT rowid, {select_cols} FROM {quote_ident(table.name)} "
+        "WHERE rowid BETWEEN ? AND ? ORDER BY rowid",
+        (first_rowid, last_rowid),
+    )
+    return [(int(row[0]), tuple(row[1:])) for row in cursor]
+
+
 def _process_table(
     inventory: DatasetInventory,
     table: TableInfo,
@@ -116,25 +145,45 @@ def _process_table(
     batch_size: int,
     batch_counter: list[int],
     interrupt_after_batches: int | None,
+    checksum_mode: str = CHECKSUM_PLAIN,
+    verify_key: bytes | None = None,
 ) -> tuple[int, int, dict[str, dict[str, int]]]:
     after = checkpoint.last_rowid if checkpoint else 0
     rows_done = checkpoint.rows_done if checkpoint else 0
     table_counts = copy.deepcopy(checkpoint.counts) if checkpoint else {}
+    batch_index = store.count_batch_checksums(run_id, table.name) if store else 0
     for batch in source_batches(inventory, table, after, batch_size):
         transformed = [
             (rowid, transform_row(values, table, table_policy, context, table_counts))
             for rowid, values in batch
         ]
+        batch_record: dict[str, Any] | None = None
         if target is not None:
             with target:
                 insert_batch(target, table, transformed)
+                stored = _read_back_batch(target, table, transformed[0][0], transformed[-1][0])
+            hasher = StreamChecksum(
+                checksum_mode, verify_key, batch_checksum_header(run_id, table.name, batch_index)
+            )
+            for rowid, values in stored:
+                hasher.add_values([rowid, *values])
+            batch_record = {
+                "batch": batch_index,
+                "first_rowid": stored[0][0],
+                "last_rowid": stored[-1][0],
+                "rows": len(stored),
+                "checksum": hasher.hexdigest(),
+            }
+            batch_index += 1
         if mapping is not None:
             mapping.commit()
         rows_done += len(transformed)
         after = transformed[-1][0]
         batch_counter[0] += 1
         if store is not None:
-            store.save_checkpoint(run_id, table.name, after, rows_done, table_counts)
+            store.save_checkpoint(
+                run_id, table.name, after, rows_done, table_counts, batch_record=batch_record
+            )
         if interrupt_after_batches is not None and batch_counter[0] >= interrupt_after_batches:
             raise PipelineInterrupted(run_id)
     if store is not None and checkpoint is None:
@@ -161,6 +210,10 @@ def execute_run(
         raise PipelineError("dry-run cannot be combined with resume")
     started = time.monotonic()
     run_id = resume_run_id or new_run_id()
+    checksum_mode = CHECKSUM_HMAC if secrets_store is not None else CHECKSUM_PLAIN
+    verify_key = (
+        derive_verify_key(secrets_store.get("hmac_salt")) if secrets_store is not None else None
+    )
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
@@ -193,7 +246,7 @@ def execute_run(
             _after, _rows, table_counts = _process_table(
                 inventory, table, rule.tables.get(table.name), checkpoint, target,
                 store, context, mapping, run_id, batch_size, batch_counter,
-                interrupt_after_batches,
+                interrupt_after_batches, checksum_mode, verify_key,
             )
             if dry_run:
                 merge_counts(dry_counts, table_counts)
@@ -219,6 +272,14 @@ def execute_run(
                 policy_changed=False, dry_run=True,
             )
         assert store is not None and output is not None
+        pseudomap_count: int | None = None
+        pseudomap_digest: str | None = None
+        if mapping is not None:
+            pseudomap_count = mapping.count()
+            digest = StreamChecksum(checksum_mode, verify_key, pseudomap_checksum_header())
+            for token, plaintext in mapping.iter_token_rows():
+                digest.add_values([token, plaintext])
+            pseudomap_digest = digest.hexdigest()
         store.set_status(run_id, "completed")
         output_hash = sqlite_content_digest(output)
         final_counts: dict[str, dict[str, int]] = {}
@@ -227,9 +288,19 @@ def execute_run(
             table_rows[checkpoint.table_name] = checkpoint.rows_done
             merge_counts(final_counts, checkpoint.counts)
         row_count = sum(table_rows.values())
+        tables_detail = {
+            table.name: {
+                "rows": table_rows.get(table.name, 0),
+                "columns": [column.name for column in table.columns],
+                "batches": store.list_batch_checksums(run_id, table.name),
+            }
+            for table in inventory.tables
+        }
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
             row_count, transformer_map, final_counts,
+            checksum_mode=checksum_mode, pseudomap_count=pseudomap_count,
+            pseudomap_digest=pseudomap_digest, tables_detail=tables_detail,
         )
         return RunResult(
             run_id=run_id, dataset_path=inventory.path,
@@ -239,6 +310,8 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            checksum_mode=checksum_mode, pseudomap_count=pseudomap_count,
+            pseudomap_digest=pseudomap_digest,
         )
     except PipelineInterrupted:
         if store is not None:

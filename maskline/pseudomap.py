@@ -89,6 +89,14 @@ class PseudoMap:
     def count(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) FROM pseudonym_map").fetchone()[0])
 
+    def iter_token_rows(self) -> Iterator[tuple[str, str]]:
+        """Yield (token, plaintext) pairs ordered by token, for digesting."""
+        cursor = self.conn.execute(
+            "SELECT token, plaintext FROM pseudonym_map ORDER BY token"
+        )
+        for row in cursor:
+            yield row[0], row[1]
+
     def iter_entries(self, limit: int = 100) -> Iterator[tuple[str, str]]:
         rows = self.conn.execute(
             "SELECT token, plaintext FROM pseudonym_map ORDER BY created_at, token LIMIT ?",

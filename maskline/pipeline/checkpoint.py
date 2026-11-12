@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,16 @@ class CheckpointStore:
                 counts_json TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY (run_id, table_name)
             );
+            CREATE TABLE IF NOT EXISTS batch_checksums (
+                run_id TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                batch INTEGER NOT NULL,
+                first_rowid INTEGER NOT NULL,
+                last_rowid INTEGER NOT NULL,
+                rows INTEGER NOT NULL,
+                checksum TEXT NOT NULL,
+                PRIMARY KEY (run_id, table_name, batch)
+            );
             """
         )
         self.conn.commit()
@@ -106,6 +117,7 @@ class CheckpointStore:
         last_rowid: int,
         rows_done: int,
         counts: dict[str, dict[str, int]] | None = None,
+        batch_record: dict[str, Any] | None = None,
     ) -> None:
         now = _now()
         payload = json.dumps(counts or {}, sort_keys=True)
@@ -122,8 +134,41 @@ class CheckpointStore:
             """,
             (run_id, table_name, last_rowid, rows_done, now, payload),
         )
+        if batch_record is not None:
+            self.conn.execute(
+                """
+                INSERT INTO batch_checksums
+                    (run_id, table_name, batch, first_rowid, last_rowid, rows, checksum)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, table_name, batch) DO UPDATE SET
+                    first_rowid=excluded.first_rowid,
+                    last_rowid=excluded.last_rowid,
+                    rows=excluded.rows,
+                    checksum=excluded.checksum
+                """,
+                (
+                    run_id, table_name, int(batch_record["batch"]),
+                    int(batch_record["first_rowid"]), int(batch_record["last_rowid"]),
+                    int(batch_record["rows"]), str(batch_record["checksum"]),
+                ),
+            )
         self.conn.execute("UPDATE runs SET updated_at = ? WHERE run_id = ?", (now, run_id))
         self.conn.commit()
+
+    def count_batch_checksums(self, run_id: str, table_name: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM batch_checksums WHERE run_id = ? AND table_name = ?",
+            (run_id, table_name),
+        ).fetchone()
+        return int(row[0])
+
+    def list_batch_checksums(self, run_id: str, table_name: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT batch, first_rowid, last_rowid, rows, checksum FROM batch_checksums "
+            "WHERE run_id = ? AND table_name = ? ORDER BY batch",
+            (run_id, table_name),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_checkpoint(self, run_id: str, table_name: str) -> TableCheckpoint | None:
         row = self.conn.execute(

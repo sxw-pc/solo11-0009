@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from .pipeline.runner import PipelineError, execute_run
 from .pseudomap import PseudoMap, PseudoMapError
 from .registry import inspect_dataset
 from .utils import MasklineError
+from .verify import verify_run
 from .workflow import finalize_run, needs_secret, scan_paths
 
 
@@ -57,6 +59,11 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    verify = sub.add_parser(
+        "verify", parents=[common],
+        help="verify a completed run's target and mapping databases against its manifest",
+    )
+    verify.add_argument("--run-id", required=True)
     return parser
 
 
@@ -210,6 +217,41 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    # No MASKLINE_SECRET_FILE means keyed checksums cannot be recomputed:
+    # verify then runs in its documented degraded mode instead of failing.
+    secrets_store = (
+        SecretStore.from_env() if os.environ.get("MASKLINE_SECRET_FILE") else None
+    )
+    report = verify_run(paths, args.run_id, secrets_store=secrets_store)
+    if report.ok:
+        if report.degraded:
+            print(f"OK (degraded): {report.run_id} — reduced checks only")
+            warning = (
+                "WARNING: " + (report.degraded_reason or "secret unavailable")
+                + "; hash/pseudonym column values are NOT covered by this "
+                "verification"
+            )
+            print(f"  {warning}")
+            print(f"  {warning}", file=sys.stderr)
+        else:
+            print(f"OK: {report.run_id} integrity verified")
+    else:
+        print(f"FAILED: {report.run_id} — {len(report.mismatches)} mismatch(es) detected")
+        for mismatch in report.mismatches:
+            print(f"  {mismatch.describe()}")
+    print(
+        f"  checks: tables={report.tables_checked} batches={report.batches_checked} "
+        f"rows={report.rows_checked} degraded={report.degraded}"
+    )
+    for note in report.notes:
+        print(f"  note: {note}")
+    if report.audit_appended:
+        print(f"  verify event appended to audit chain (seq={report.audit_seq})")
+    return 0 if report.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -220,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
+        "verify": _cmd_verify,
     }
     try:
         return handlers[args.command](args)

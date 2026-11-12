@@ -39,6 +39,10 @@ def write_manifest(
     row_count: int,
     transformer_map: dict[str, dict[str, str]],
     transform_counts: dict[str, dict[str, int]],
+    checksum_mode: str = "",
+    pseudomap_count: int | None = None,
+    pseudomap_digest: str | None = None,
+    tables_detail: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[Path, bool]:
     previous = previous_manifest(manifest_dir, inventory.fingerprint)
     changed = bool(
@@ -58,6 +62,10 @@ def write_manifest(
         "row_count": row_count,
         "transformers": transformer_map,
         "transform_counts": transform_counts,
+        "checksum_mode": checksum_mode,
+        "pseudomap_count": pseudomap_count,
+        "pseudomap_digest": pseudomap_digest,
+        "tables": tables_detail or {},
         "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     target = manifest_path(manifest_dir, inventory.fingerprint)

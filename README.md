@@ -95,7 +95,7 @@ maskline/
 ├── Makefile
 ├── secret.example.txt
 ├── maskline/
-│   ├── __main__.py          # demo / scan / run / resume / reveal / audit
+│   ├── __main__.py          # demo / scan / run / resume / reveal / audit / verify
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
@@ -103,6 +103,8 @@ maskline/
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
+│   ├── integrity.py         # 流式批次校验和（带密钥 HMAC / 无密钥 SHA-256）
+│   ├── verify.py            # 交付后完整性核验（只读、降级模式、审计事件）
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
@@ -178,6 +180,9 @@ python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 # 用映射库还原某个假名 token
 python -m maskline reveal --token psn_xxxxxxxx
 
+# 核验某个已完成 run 的目标库与映射库自写完以来未被改动
+python -m maskline verify --run-id run-xxxxxxxx-xxxxxx
+
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
 ```
@@ -195,6 +200,37 @@ python -m maskline audit --verify
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。
 
 详细风险见 [docs/threat-model.md](docs/threat-model.md)。
+
+## 交付完整性核验（verify）
+
+`run` 结束时会把每一批的行数与校验和写入 manifest（同时持久化在检查点库），`verify` 用它证明目标库与假名映射库**自写完那一刻起未被改动**：
+
+```bash
+python -m maskline verify --run-id run-xxxxxxxx-xxxxxx
+```
+
+校验项（全部流式，逐批游标读取，任何时刻内存中至多一批行）：
+
+- **审计链**：哈希链与头锚点必须自洽，且链上存在该 run 的完成事件。
+- **证据一致性**：检查点库、manifest、审计事件三者的输出路径、数据集指纹、`output_hash`、行数、映射库计数/摘要互相比对。
+- **目标库结构**：表集合与各表列名必须与 manifest 一致。
+- **批次行数与校验和**：按 manifest 记录的每批 rowid 范围重读目标库，先比对行数，再重算校验和比对；另检查表总行数与 rowid 边界，批次范围之外多出的行同样会被检出。任何不一致都会指明具体的表与批次。
+- **假名映射库**：记录数不得少于该 run 完成事件记录的条数（变少即检出丢失）；变多必须能被审计链中后续 run 的完成事件解释；计数相等时重算映射内容摘要，可检出「计数不变的改写」。
+
+**批次校验和的密钥。** 策略含 `hash`/`pseudonym` 的 run 使用密钥执行，其批次校验和与映射库摘要是带密钥的 HMAC-SHA256（`checksum_mode: hmac-sha256`，密钥由 `hmac_salt` 派生并与 `hash` 转换器域分离）：只持有工作区文件的人篡改数据后无法伪造一致的证据。策略不含这两类转换器的 run 不需要密钥，校验和为无密钥 SHA-256（`checksum_mode: sha256`），verify 随时可完整复核。
+
+**密钥缺失时的降级行为（承诺的语义）。** verify 时设置 `MASKLINE_SECRET_FILE` 即完整核验；未设置时 verify **降级而不是失败**：
+
+- 仍校验：审计链、证据一致性、表结构、逐批/整表行数、映射库记录数；
+- 不校验：批次内容校验和与映射库内容摘要——即保持行数不变的取值改写（含 `hash`/`pseudonym` 列）**无法检出**；
+- 输出以 `OK (degraded)` 开头并向 stderr 打印醒目 WARNING；写入审计链的 verify 事件带 `degraded: true`、`result: ok_degraded`；
+- 若环境变量指向的密钥文件存在但无法解析，按操作错误处理（退出码 2），不会静默降级。
+
+**退出码**：`0` 已执行的校验全部通过（含降级通过）；`1` 发现不一致（输出逐项指明表与批次）；`2` 无法执行核验（run 未知或未完成、manifest 被同数据集的后续 run 覆盖、manifest 过旧不含批次校验和、密钥文件不可读等）。
+
+**只读保证**：目标库、映射库、检查点库一律以 `mode=ro` + `PRAGMA query_only` 打开；verify 不产生任何写操作或临时文件残留，唯一的写入是按设计向审计链追加一条 `event: verify` 记录（含结果与每一项不一致；审计链本身不完整时无法追加，会在输出中注明）。
+
+**生命周期**：manifest 按数据集跟踪最新 run；核验已被同数据集后续 run 覆盖的旧 run 会得到退出码 2 与说明。交付归档时请把对应 manifest、审计链与头锚点一起保存。
 
 ## 测试
 
