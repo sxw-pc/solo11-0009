@@ -15,6 +15,7 @@
 **是：**
 
 - 本地数据集的敏感字段发现引擎（正则 + 校验位 + 中文词典启发）
+- 跨数据集敏感关联风险识别（等值/语义关联、组合风险评级、关联图谱）
 - 基于 YAML 的声明式脱敏策略执行器
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
@@ -103,6 +104,7 @@ maskline/
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
+│   ├── linkage/             # 跨数据集关联风险识别（画像/匹配/图谱/评级/存储）
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
@@ -180,9 +182,41 @@ python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
+
+# 跨数据集关联风险：生成合成关联数据并一键演示
+python -m maskline linkdemo
+
+# 扫描目录，识别跨文件敏感关联组合（增量，无需全量重扫）
+python -m maskline linkscan data/raw
+
+# 导出建议脱敏策略（可直接复核后用于 run --policy）
+python -m maskline linkscan data/raw --export-policy \
+  --ignore-rules policies/linkignore.example.yaml
+
+# 查看最新版本的关联图谱与风险清单
+python -m maskline links
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
+
+## 跨数据集敏感关联风险识别
+
+单数据集识别存在一个盲区：某些字段单独看并不敏感，但多个离线文件通过唯一标识
+类字段（手机号、身份证号、会员号等）关联后，组合出的信息属于高度敏感，导致
+脱敏规则配置不到位。`linkscan` 整合现有的单库敏感识别、字段指纹与新增的关联
+关系建模能力，自动扫描目录下全部离线数据集：
+
+- 识别跨文件的**等值关联**（值集指纹包含度匹配）与**语义关联**（同敏感类型 /
+  列名同义词组）；
+- 按数据集连通分量聚类，计算关联后**敏感组合**的风险等级（沿用现有
+  0.8/0.5/0.2 置信阈值，命中姓名+身份证等组合规则时升至"极高"）；
+- 输出关联关系图谱与风险点清单（`reports/linkage/linkgraph-vN.{md,json}`），
+  并可导出建议脱敏策略直接对接规则配置；
+- 结果版本化存储（`data/linkgraph.sqlite`），数据集新增/修改后自动增量更新，
+  无需全量重扫；并发扫描受文件句柄预算约束，损坏/编码异常文件跳过并告警，
+  全程写入审计链；支持 YAML 忽略规则排除非关联字段降低误判。
+
+完整说明见 [docs/linkage.md](docs/linkage.md)。
 
 ## 幂等、断点与安全边界
 

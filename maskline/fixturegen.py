@@ -198,3 +198,138 @@ def generate_fixture(
         writer.writerow(header)
         writer.writerows(lead_rows)
     return {"sqlite": sqlite_path, "csv": csv_path}
+
+
+# Given-name pools kept disjoint so cross-file person-name matches stay
+# semantic-only (no accidental value overlap) in the linkage fixture.
+PAYMENT_GIVEN = "伟强磊军洋勇艳杰涛明"
+SURVEY_GIVEN = "雪梅兰菊芳"
+
+
+def generate_linkage_fixture(
+    raw_dir: str | Path,
+    seed: int = 20240617,
+    members: int = 24,
+    kyc: int = 18,
+    payments: int = 12,
+    orders: int = 80,
+    survey: int = 16,
+) -> dict[str, Path]:
+    """Synthetic datasets with deliberate cross-file join keys (fixed seed).
+
+    members.sqlite  members(member_id, full_name, phone, email, joined_at)
+    kyc.csv         (phone, id_card, address)        -- phone shared with members
+    payments.csv    (card_no, id_card, holder_name)  -- id_card shared with kyc
+    orders.sqlite   orders(order_id, member_id, amount, created_at)
+    survey.csv      (respondent_name, age, feedback) -- semantic-only names
+    """
+    if not (0 < payments <= kyc <= members):
+        raise ValueError("expected 0 < payments <= kyc <= members")
+    target = Path(raw_dir).expanduser().resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(seed)
+    paths = {
+        "members": target / "members.sqlite",
+        "orders": target / "orders.sqlite",
+        "kyc": target / "kyc.csv",
+        "payments": target / "payments.csv",
+        "survey": target / "survey.csv",
+    }
+    for path in paths.values():
+        if path.exists():
+            path.unlink()
+    for key in ("members", "orders"):
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(paths[key]) + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+    phones = [synthetic_phone(rng) for _ in range(members)]
+    id_cards = [
+        synthetic_id_card(rng, date(1965, 1, 1) + timedelta(days=rng.randint(0, 9000)))
+        for _ in range(members)
+    ]
+    base = date(2024, 1, 1)
+    member_rows = [
+        (
+            index,
+            synthetic_name(rng),
+            phones[index - 1],
+            f"member{index:03d}@example.invalid",
+            (base - timedelta(days=rng.randint(30, 900))).isoformat(),
+        )
+        for index in range(1, members + 1)
+    ]
+    order_rows = [
+        (
+            index,
+            rng.randint(1, members),
+            round(rng.uniform(10, 5000), 2),
+            (base + timedelta(days=rng.randint(0, 364))).isoformat(),
+        )
+        for index in range(1, orders + 1)
+    ]
+    conn = sqlite3.connect(paths["members"])
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE members (
+                member_id INTEGER PRIMARY KEY,
+                full_name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT,
+                joined_at TEXT
+            );
+            """
+        )
+        conn.executemany("INSERT INTO members VALUES (?,?,?,?,?)", member_rows)
+        conn.commit()
+    finally:
+        conn.close()
+    conn = sqlite3.connect(paths["orders"])
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE orders (
+                order_id INTEGER PRIMARY KEY,
+                member_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.executemany("INSERT INTO orders VALUES (?,?,?,?)", order_rows)
+        conn.commit()
+    finally:
+        conn.close()
+    kyc_rows = [
+        (phones[index], id_cards[index], synthetic_address(rng)) for index in range(kyc)
+    ]
+    with paths["kyc"].open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["phone", "id_card", "address"])
+        writer.writerows(kyc_rows)
+    payment_rows = [
+        (
+            synthetic_bank_card(rng),
+            id_cards[index],
+            rng.choice(SURNAMES) + rng.choice(PAYMENT_GIVEN),
+        )
+        for index in range(payments)
+    ]
+    with paths["payments"].open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["card_no", "id_card", "holder_name"])
+        writer.writerows(payment_rows)
+    survey_rows = [
+        (
+            rng.choice(SURNAMES) + rng.choice(SURVEY_GIVEN),
+            rng.randint(18, 70),
+            f"演示反馈{index:03d}",
+        )
+        for index in range(1, survey + 1)
+    ]
+    with paths["survey"].open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["respondent_name", "age", "feedback"])
+        writer.writerows(survey_rows)
+    return paths

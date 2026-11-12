@@ -49,6 +49,15 @@ class Paths:
     def pseudomap_db(self) -> Path:
         return self.data_dir / "pseudomap.sqlite"
     @property
+    def linkgraph_db(self) -> Path:
+        return self.data_dir / "linkgraph.sqlite"
+    @property
+    def linkraw_dir(self) -> Path:
+        return self.data_dir / "linkage-raw"
+    @property
+    def linkage_reports_dir(self) -> Path:
+        return self.reports_dir / "linkage"
+    @property
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
     @property

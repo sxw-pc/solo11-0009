@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maskline"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline sensitive-field discovery and declarative masking pipeline for local datasets"
 readme = "README.md"
 requires-python = ">=3.11"

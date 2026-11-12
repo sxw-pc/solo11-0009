@@ -1,4 +1,4 @@
-.PHONY: install test demo fixture audit clean
+.PHONY: install test demo fixture audit clean linkdemo
 
 install:
 	python -m pip install -e ".[dev]"
@@ -8,6 +8,9 @@ test:
 
 demo:
 	python -m maskline demo
+
+linkdemo:
+	python -m maskline linkdemo
 
 fixture:
 	python scripts/make_fixture.py

@@ -1,0 +1,17 @@
+# 跨数据集关联扫描忽略规则示例。
+# 用法：python -m maskline linkscan data/raw --ignore-rules policies/linkignore.example.yaml
+version: 1
+ignore:
+  # 整个数据集文件不参与关联扫描（路径 glob，可匹配文件名或完整路径）
+  datasets:
+    - "scratch/*"
+  # 指定字段不参与跨库匹配与组合评级（<路径 glob>:<表>.<列>，均支持 glob）
+  columns:
+    - "demo.sqlite:customers.notes"
+    - "*:orders.status"
+  # 指定字段对之间不建立等值关联
+  pairs:
+    - ["members.sqlite:members.member_id", "orders.sqlite:orders.member_id"]
+  # 指定敏感类型不参与组合风险评级与语义关联
+  sensitive_types:
+    - "ipv4"

@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .dataset_io import (
     DatasetError,
@@ -234,6 +234,16 @@ class Catalog:
         return item
 
     def save_finding(self, record: dict[str, Any]) -> None:
+        self._insert_finding(record)
+        self.conn.commit()
+
+    def save_findings(self, records: Iterable[dict[str, Any]]) -> None:
+        """Insert many findings in one transaction (one commit)."""
+        with self.conn:
+            for record in records:
+                self._insert_finding(record)
+
+    def _insert_finding(self, record: dict[str, Any]) -> None:
         self.conn.execute(
             """
             INSERT INTO findings (
@@ -265,7 +275,6 @@ class Catalog:
                 _now(),
             ),
         )
-        self.conn.commit()
 
     def findings_for(self, fingerprint: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(

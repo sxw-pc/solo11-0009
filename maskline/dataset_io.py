@@ -131,6 +131,39 @@ def iter_table_rows(
         conn.close()
 
 
+def read_table_sample(
+    path: Path, kind: str, table: str, limit: int
+) -> tuple[list[str], list[tuple[Any, ...]]]:
+    """Read up to ``limit`` rows from one table in a single pass.
+
+    Returns (column names, rows). Used by the linkage profiler so a dataset is
+    opened once per table instead of once per column.
+    """
+    if limit < 1:
+        raise ValueError("sample limit must be positive")
+    if kind == "sqlite":
+        conn = sqlite_connect_readonly(path)
+        try:
+            columns = [item["name"] for item in sqlite_columns(conn, table)]
+            select_cols = ", ".join(quote_ident(name) for name in columns)
+            rows = conn.execute(
+                f"SELECT {select_cols} FROM {quote_ident(table)} LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return columns, [tuple(row) for row in rows]
+        except sqlite3.Error as exc:
+            raise DatasetError(f"cannot sample table {table!r} from {path}: {exc}") from exc
+        finally:
+            conn.close()
+    header = read_csv_header(path)
+    rows: list[tuple[Any, ...]] = []
+    for row in iter_csv_tuples(path):
+        rows.append(tuple(row))
+        if len(rows) >= limit:
+            break
+    return header, rows
+
+
 def read_column_samples(
     path: Path, kind: str, table: str, column: str, limit: int
 ) -> list[Any]:
