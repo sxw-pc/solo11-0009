@@ -25,12 +25,13 @@ class PseudonymTransformer:
             return value
         if context.secrets is None:
             raise TransformError("pseudonym transformer requires a secret store")
-        key = context.secrets.get("pseudonym_key")
-        token = pseudonym_token(str(value), key)
+        # New mappings always use the currently active key generation.
+        active = context.secrets.current_pseudonym_key()
+        token = pseudonym_token(str(value), active.value)
         if context.pseudomap is None:
             if context.write_mapping:
                 raise TransformError("pseudonym transformer requires a mapping store")
             return token
         if context.write_mapping:
-            context.pseudomap.put(token, str(value))
+            context.pseudomap.put(token, str(value), kid=active.kid)
         return token

@@ -179,12 +179,17 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 def _cmd_reveal(args: argparse.Namespace) -> int:
     paths = _paths(args)
+    secrets_store = SecretStore.from_env()
     try:
-        with PseudoMap(paths.pseudomap_db) as mapping:
-            plaintext = mapping.reveal(args.token)
+        with PseudoMap(
+            paths.pseudomap_db, current_kid=secrets_store.current_kid()
+        ) as mapping:
+            plaintext = mapping.reveal(args.token, secrets_store)
+            kid = mapping.kid_for(args.token)
     except PseudoMapError as exc:
         raise MasklineError(str(exc)) from exc
     print(plaintext)
+    print(f"kid={kid}", file=sys.stderr)
     return 0
 
 
@@ -203,6 +208,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     for entry in entries[-args.tail:]:
         print(
             f"seq={entry.get('seq')} run={entry.get('run_id')} "
+            f"kid={entry.get('pseudonym_kid', '-')} "
             f"rows={entry.get('rows_processed')} "
             f"policy={entry.get('policy_fingerprint', '')[:16]}... "
             f"output_hash={entry.get('output_hash', '')[:16]}..."

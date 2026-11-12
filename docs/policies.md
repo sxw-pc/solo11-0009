@@ -115,9 +115,10 @@ phone:
 
 无参数。
 
-- 使用密钥文件中的 `pseudonym_key`，对原文做 HMAC-SHA256 并取前 40 位，输出形如 `psn_...`。
+- 使用密钥文件中标记为 `current: true` 的假名密钥（按 `kid` 标识），对原文做 HMAC-SHA256 并取前 40 位，输出形如 `psn_...`。
 - 同一密钥、同一原文跨表、跨运行得到同一假名；不同原文不同假名。
-- 明文/假名映射写入独立文件 `data/pseudomap.sqlite`。`python -m maskline reveal --token <token>` 可还原。
+- 明文/假名映射写入独立文件 `data/pseudomap.sqlite`，每行同时记录生成时使用的 `kid`。`python -m maskline reveal --token <token>` 按该行的 `kid` 选钥还原，并在 stderr 打印对应的 `kid`。
+- 密钥轮换后，新映射使用新的当前 `kid`，旧映射仍按各自记录的 `kid` 还原；同一人轮换前后的两条假名并存且互不影响。详见 README「多密钥与 90 天轮换」。
 - `NULL`、空串原样返回。
 - 映射库等同密钥：离开映射库无法还原；持有映射库的人可还原全部假名。不要与脱敏输出一起交付。
 - dry-run 会计算假名但不写映射库，因此 dry-run 输出不可用于后续还原。

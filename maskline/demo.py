@@ -93,10 +93,15 @@ def run_demo(
         print(f"  report={report_md}")
         print(f"  audit entry seq={artifacts['audit']['seq']}")
     try:
-        with PseudoMap(paths.pseudomap_db) as mapping:
-            for token, plaintext in mapping.iter_entries(limit=1):
+        with PseudoMap(
+            paths.pseudomap_db, current_kid=secret_store.current_kid()
+        ) as mapping:
+            for kid, token, plaintext in mapping.iter_records(limit=1):
                 result.revealed_sample = (token, plaintext)
-                print(f"\nReveal sample: {token} -> {plaintext}")
+                print(
+                    f"\nReveal sample: {token} -> {plaintext} "
+                    f"(verified with kid={kid})"
+                )
                 break
     except PseudoMapError:
         pass

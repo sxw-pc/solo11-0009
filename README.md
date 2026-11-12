@@ -125,7 +125,7 @@ maskline/
 python - <<'PY'
 import secrets
 print('hmac_salt:', secrets.token_urlsafe(48))
-print('pseudonym_key:', secrets.token_urlsafe(48))
+print('pseudonym value:', secrets.token_urlsafe(48))
 PY
 # 2. 写入一个仅本人可读的文件，例如 ~/maskline-secret.txt
 # 3. 指向它
@@ -134,7 +134,33 @@ export MASKLINE_SECRET_FILE=~/maskline-secret.txt
 # $env:MASKLINE_SECRET_FILE = "C:\secure\maskline-secret.txt"
 ```
 
-文件格式见 `secret.example.txt`。两个值必须独立且至少 16 个字符。代码和策略只引用密钥名（如 `hmac_salt`），不包含密钥本身。丢失密钥会导致 HMAC 结果无法重现。
+文件格式见 `secret.example.txt`。所有密钥值必须独立且至少 16 个字符。代码和策略只引用密钥名（如 `hmac_salt`）或密钥标识（`kid`），不包含密钥本身。丢失密钥会导致 HMAC 结果无法重现。
+
+### 多密钥与 90 天轮换
+
+假名密钥支持多版本并存，每个版本有一个密钥标识 `kid`，且恰有一个条目标记 `current: true`：
+
+```yaml
+hmac_salt: "..."
+keys:
+  - kid: "2026-Q1"
+    value: "..."          # 上一轮的密钥，必须保留
+    current: false
+  - kid: "2026-Q2"
+    value: "..."          # 新生成的随机值
+    current: true         # 新映射一律用这一把
+```
+
+- **新映射**始终使用 `current: true` 的密钥，并在 `pseudomap.sqlite` 每行记录生成时的 `kid`。
+- **reveal 还原**按映射行里的 `kid` 选钥，因此轮换前的旧映射只要其 `kid` 仍在文件中就能继续还原；同一人在轮换前后产生的两条假名互不干扰、并存于同一映射库。
+- **轮换操作**：追加新的 `kid`/`value` 条目，把 `current: true` 移到新条目，并**保留全部旧条目**。可用脚本完成：
+  ```bash
+  python scripts/rotate_key.py "$MASKLINE_SECRET_FILE" --kid 2026-Q2
+  ```
+  删除某个旧 `kid` 后，用该密钥生成的历史映射将无法还原（会明确报错指出缺少哪个 `kid`）。
+- **旧格式兼容**：只有 `hmac_salt` / `pseudonym_key` 两个标量的旧密钥文件仍可直接读取，其假名密钥归入默认 `kid: "default"`；没有 `kid` 列的旧映射库在新版本打开时自动迁移并按默认 `kid` 处理，不会报错拒绝。
+- **严格校验**：`keys` 中没有任何 `current: true`、存在多个 `current: true`、或 `kid` 重复时，加载会直接报错并指出是哪一组配置有问题，不会静默挑一把继续运行。
+- **审计只记 `kid`**：审计日志只出现 `pseudonym_kid` 标识，绝不写入任何密钥内容。
 
 ## 最小策略示例
 

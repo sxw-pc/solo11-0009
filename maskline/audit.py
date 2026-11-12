@@ -154,6 +154,10 @@ def build_audit_entry(
         "output_hash": result.output_hash,
         "elapsed_seconds": round(result.elapsed_seconds, 6),
     }
+    # Only the key identifier is audited; key material must never reach the log.
+    pseudonym_kid = getattr(result, "pseudonym_kid", None)
+    if pseudonym_kid is not None:
+        entry["pseudonym_kid"] = pseudonym_kid
     if extra:
         entry.update(extra)
     return entry

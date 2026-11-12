@@ -45,6 +45,7 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    pseudonym_kid: str | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -174,7 +175,11 @@ def execute_run(
             if _requires_secret(rule):
                 if secrets_store is None:
                     raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
-                mapping = PseudoMap(paths.pseudomap_db, create=True)
+                mapping = PseudoMap(
+                    paths.pseudomap_db,
+                    create=True,
+                    current_kid=secrets_store.current_kid(),
+                )
             target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
@@ -217,6 +222,7 @@ def execute_run(
                 transform_counts=dry_counts, transformer_map=transformer_map,
                 table_rows={table.name: table.row_count for table in inventory.tables},
                 policy_changed=False, dry_run=True,
+                pseudonym_kid=secrets_store.current_kid() if secrets_store else None,
             )
         assert store is not None and output is not None
         store.set_status(run_id, "completed")
@@ -227,6 +233,11 @@ def execute_run(
             table_rows[checkpoint.table_name] = checkpoint.rows_done
             merge_counts(final_counts, checkpoint.counts)
         row_count = sum(table_rows.values())
+        pseudonym_kid = (
+            secrets_store.current_kid()
+            if _requires_secret(rule) and secrets_store is not None
+            else None
+        )
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
             row_count, transformer_map, final_counts,
@@ -239,6 +250,7 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            pseudonym_kid=pseudonym_kid,
         )
     except PipelineInterrupted:
         if store is not None:
