@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 from dataclasses import dataclass
@@ -35,6 +37,24 @@ def head_path(log_path: Path) -> Path:
     return log_path.with_name(log_path.name + ".head")
 
 
+@contextlib.contextmanager
+def _locked_append(log_path: Path):
+    """Hold an exclusive cross-process lock while extending the hash chain.
+
+    Multiple maskline processes (formal runs and simulations) can append
+    concurrently. The lock makes read-verify-append-anchor atomic so two
+    processes cannot interleave entries and corrupt seq/prev_hash linkage.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = log_path.with_name(log_path.name + ".lock")
+    with lock_path.open("a+") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
 class AuditLog:
 
     def __init__(self, path: str | Path) -> None:
@@ -42,6 +62,10 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
+        with _locked_append(self.path):
+            return self._append_locked(entry)
+
+    def _append_locked(self, entry: dict[str, Any]) -> dict[str, Any]:
         previous_hash = GENESIS_HASH
         sequence = 1
         if self.path.exists() and self.path.stat().st_size > 0:

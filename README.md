@@ -103,6 +103,7 @@ maskline/
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
+│   ├── simulation/          # 策略影响仿真：采样、四类指标、版本对比、隔离临时资源
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
@@ -180,6 +181,15 @@ python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
+
+# 策略影响仿真：不修改源数据、不生成正式脱敏产物，输出四类量化指标
+python -m maskline simulate --dataset data/raw/demo.sqlite \
+  --policy policies/example.yaml \
+  --linkage orders.customer_id=customers.customer_id \
+  --kpi orders.amount
+
+# 与同一数据集的历史仿真结果做版本对比
+python -m maskline simulate-diff --current sim-xxxxxxxx
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
@@ -195,6 +205,18 @@ python -m maskline audit --verify
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。
 
 详细风险见 [docs/threat-model.md](docs/threat-model.md)。
+
+## 策略影响仿真评估
+
+调整规则后无需再跑全量脱敏：`maskline simulate` 在只读访问源数据、不写正式产物的前提下完成一次仿真，输出每字段的**脱敏覆盖率、取值分布偏移度（PSI / JS 散度）、跨表关联保留率、核心业务指标偏差率**，并支持与历史仿真做版本对比（`maskline simulate-diff`）。
+
+- 完全复用声明式策略解析与六类转换器，策略语法 100% 兼容；
+- 蓄水池采样 + 确定性边缘取值（空值、最短/最长、数值极值），单文件超阈值自动切换流式模式；
+- 每次仿真使用独立 `0700` 临时目录与临时假名库，结束自动清理，绝不写入 `data/out`；
+- 成功与失败尝试都写入同一条审计哈希链（`event_type=policy_impact_simulation`），并发安全；
+- 结果持久化在独立的 `data/simulations.sqlite`，报告在 `reports/<sim_id>.sim.{md,json}`。
+
+指标定义、参数与异常处理见 [docs/simulation.md](docs/simulation.md)。
 
 ## 测试
 
