@@ -12,7 +12,7 @@ import yaml
 
 from .registry import DatasetInventory
 from .transformers import REGISTRY, TransformError
-from .utils import MasklineError, canonical_json
+from .utils import MasklineError, canonical_json, validate_namespace
 
 
 class PolicyError(MasklineError):
@@ -43,12 +43,18 @@ class TablePolicy:
 class DatasetRule:
     path_pattern: str
     tables: dict[str, TablePolicy]
+    namespace: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "path": self.path_pattern,
             "tables": {name: table.to_dict() for name, table in self.tables.items()},
         }
+        # Only serialize an explicit namespace so policies written before
+        # namespaces existed keep their historical fingerprints.
+        if self.namespace is not None:
+            data["namespace"] = self.namespace
+        return data
 
 
 @dataclass(frozen=True)
@@ -173,7 +179,7 @@ def _parse_policy(data: Any, source_path: Path) -> Policy:
     datasets: list[DatasetRule] = []
     for index, raw_rule in enumerate(raw_datasets):
         rule = _expect_mapping(raw_rule, f"datasets[{index}]")
-        allowed = set(rule) - {"path", "tables"}
+        allowed = set(rule) - {"path", "tables", "namespace"}
         if allowed:
             raise PolicyError(
                 f"datasets[{index}] has unknown keys: {', '.join(sorted(allowed))}"
@@ -184,6 +190,9 @@ def _parse_policy(data: Any, source_path: Path) -> Policy:
         if pattern in patterns:
             raise PolicyError(f"duplicate dataset path rule: {pattern}")
         patterns.add(pattern)
+        namespace = rule.get("namespace")
+        if namespace is not None:
+            namespace = validate_namespace(namespace, PolicyError)
         raw_tables = _expect_mapping(rule.get("tables"), f"datasets[{index}].tables")
         tables: dict[str, TablePolicy] = {}
         for table_name, raw_table in raw_tables.items():
@@ -211,7 +220,7 @@ def _parse_policy(data: Any, source_path: Path) -> Policy:
                 )
                 columns[key] = column_policy
             tables[table_name] = TablePolicy(table_name, columns)
-        datasets.append(DatasetRule(pattern, tables))
+        datasets.append(DatasetRule(pattern, tables, namespace))
     normalized = {
         "version": version,
         "name": name,

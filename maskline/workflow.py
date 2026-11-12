@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import pseudomap
 from .audit import AuditLog, build_audit_entry
 from .config import SecretStore
 from .dataset_io import discover_datasets
@@ -73,6 +74,27 @@ def finalize_run(
     findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
     report_paths = generate_report(paths, inventory, policy, result, findings)
-    entry = build_audit_entry(result, result.transformer_map)
-    audit_entry = AuditLog(paths.audit_path).append(entry)
-    return {"report": report_paths, "audit": audit_entry}
+    extra = None
+    if result.pseudonym_namespace is not None:
+        extra = {"pseudonym_namespace": result.pseudonym_namespace}
+    entry = build_audit_entry(result, result.transformer_map, extra=extra)
+    audit_log = AuditLog(paths.audit_path)
+    audit_entry = audit_log.append(entry)
+    warning = _capacity_warning(audit_log, result)
+    return {"report": report_paths, "audit": audit_entry, "capacity_warning": warning}
+
+
+def _capacity_warning(audit_log: AuditLog, result: Any) -> dict[str, Any] | None:
+    """Append an audit alert when a mapping store grows past the threshold."""
+    entries = result.pseudomap_entries
+    if entries is None or entries <= pseudomap.CAPACITY_WARNING_THRESHOLD:
+        return None
+    return audit_log.append(
+        {
+            "event": "pseudomap_capacity_warning",
+            "run_id": result.run_id,
+            "namespace": result.pseudonym_namespace or "default",
+            "entries": entries,
+            "threshold": pseudomap.CAPACITY_WARNING_THRESHOLD,
+        }
+    )

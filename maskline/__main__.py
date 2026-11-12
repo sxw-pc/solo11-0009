@@ -54,6 +54,10 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--sample-limit", type=int, default=200)
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
+    reveal.add_argument(
+        "--namespace", default=None,
+        help="pseudonym namespace of the mapping database (default: the shared store)",
+    )
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
@@ -179,8 +183,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 def _cmd_reveal(args: argparse.Namespace) -> int:
     paths = _paths(args)
+    mapping_path = paths.pseudomap_path(args.namespace)
     try:
-        with PseudoMap(paths.pseudomap_db) as mapping:
+        with PseudoMap(mapping_path, namespace=args.namespace) as mapping:
             plaintext = mapping.reveal(args.token)
     except PseudoMapError as exc:
         raise MasklineError(str(exc)) from exc

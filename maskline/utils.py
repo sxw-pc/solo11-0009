@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import urllib.parse
 from pathlib import Path
@@ -13,6 +14,25 @@ from typing import Any
 
 class MasklineError(RuntimeError):
     """Base class for user-facing maskline errors."""
+
+
+_NAMESPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def validate_namespace(
+    value: Any, error_cls: type[MasklineError] = MasklineError
+) -> str:
+    """Pseudonym namespaces become file names, so they must be safe identifiers.
+
+    Only letters, digits, '-' and '_' are allowed (no dots or separators), which
+    keeps mapping database paths inside the managed pseudomap directory.
+    """
+    if not isinstance(value, str) or not _NAMESPACE_RE.fullmatch(value):
+        raise error_cls(
+            f"invalid pseudonym namespace {value!r}; use 1-64 characters: "
+            "ASCII letters, digits, '-' or '_', starting with a letter or digit"
+        )
+    return value
 
 
 def canonical_json(value: Any) -> str:

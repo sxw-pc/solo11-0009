@@ -150,6 +150,7 @@ class Catalog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS datasets (
@@ -174,6 +175,17 @@ class Catalog:
                 candidates_json TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_fingerprint, table_name, column_name)
+            );
+            CREATE TABLE IF NOT EXISTS pseudonym_namespaces (
+                namespace TEXT PRIMARY KEY,
+                key_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS namespace_datasets (
+                namespace TEXT NOT NULL,
+                dataset_fingerprint TEXT NOT NULL,
+                bound_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, dataset_fingerprint)
             );
             """
         )
@@ -279,6 +291,47 @@ class Catalog:
             item["candidates"] = json.loads(item.pop("candidates_json"))
             result.append(item)
         return result
+
+    def get_namespace_key_fingerprint(self, namespace: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT key_fingerprint FROM pseudonym_namespaces WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def register_namespace(self, namespace: str, key_fingerprint: str) -> None:
+        """Record a namespace once; concurrent first runs are ignored, not errors."""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pseudonym_namespaces "
+            "(namespace, key_fingerprint, created_at) VALUES (?, ?, ?)",
+            (namespace, key_fingerprint, _now()),
+        )
+        self.conn.commit()
+
+    def dataset_namespace(self, dataset_fingerprint: str) -> str | None:
+        """Namespace a dataset fingerprint is bound to, if any."""
+        row = self.conn.execute(
+            "SELECT namespace FROM namespace_datasets WHERE dataset_fingerprint = ? "
+            "ORDER BY bound_at LIMIT 1",
+            (dataset_fingerprint,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def bind_dataset(self, namespace: str, dataset_fingerprint: str) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO namespace_datasets "
+            "(namespace, dataset_fingerprint, bound_at) VALUES (?, ?, ?)",
+            (namespace, dataset_fingerprint, _now()),
+        )
+        self.conn.commit()
+
+    def namespace_datasets(self, namespace: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT dataset_fingerprint FROM namespace_datasets "
+            "WHERE namespace = ? ORDER BY bound_at",
+            (namespace,),
+        ).fetchall()
+        return [row[0] for row in rows]
 
 
 def _now() -> str:

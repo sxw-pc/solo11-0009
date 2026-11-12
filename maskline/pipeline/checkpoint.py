@@ -42,6 +42,7 @@ class CheckpointStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout = 5000")
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS runs (

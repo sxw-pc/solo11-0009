@@ -12,8 +12,8 @@ from typing import Any
 
 from ..config import Paths, SecretStore
 from ..policies import DatasetRule, Policy
-from ..pseudomap import PseudoMap
-from ..registry import DatasetInventory, TableInfo
+from ..pseudomap import PseudoMap, ensure_namespace
+from ..registry import Catalog, DatasetInventory, TableInfo
 from ..transformers import TransformContext
 from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
@@ -45,6 +45,8 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    pseudonym_namespace: str | None = None
+    pseudomap_entries: int | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -157,6 +159,7 @@ def execute_run(
     if batch_size < 1:
         raise PipelineError("batch_size must be positive")
     rule = policy.validate_against(inventory)
+    namespace = rule.namespace
     if dry_run and resume_run_id:
         raise PipelineError("dry-run cannot be combined with resume")
     started = time.monotonic()
@@ -167,23 +170,43 @@ def execute_run(
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
+            if _requires_secret(rule):
+                if secrets_store is None:
+                    raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
+                if namespace is not None:
+                    # Fail fast, before any run record or target exists: the
+                    # namespace's key must match its registered fingerprint and
+                    # the dataset must not be stolen into another namespace.
+                    with Catalog(paths.meta_db) as catalog:
+                        ensure_namespace(
+                            catalog,
+                            namespace,
+                            inventory.fingerprint,
+                            secrets_store.get("pseudonym_key"),
+                        )
             store = CheckpointStore(paths.checkpoint_db)
             output = _prepare_target(
                 inventory, policy, paths, store, run_id, resume_run_id, output_path
             )
             if _requires_secret(rule):
-                if secrets_store is None:
-                    raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
-                mapping = PseudoMap(paths.pseudomap_db, create=True)
+                mapping = PseudoMap(
+                    paths.pseudomap_path(namespace), create=True, namespace=namespace
+                )
             target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
-                secrets=secrets_store, pseudomap=mapping, write_mapping=True
+                secrets=secrets_store,
+                pseudomap=mapping,
+                write_mapping=True,
+                namespace=namespace,
             )
         else:
             output = None
             context = TransformContext(
-                secrets=secrets_store, pseudomap=None, write_mapping=False
+                secrets=secrets_store,
+                pseudomap=None,
+                write_mapping=False,
+                namespace=namespace,
             )
         transformer_map = _transformer_map(rule)
         dry_counts: dict[str, dict[str, int]] = {}
@@ -221,6 +244,7 @@ def execute_run(
         assert store is not None and output is not None
         store.set_status(run_id, "completed")
         output_hash = sqlite_content_digest(output)
+        pseudomap_entries = mapping.count() if mapping is not None else None
         final_counts: dict[str, dict[str, int]] = {}
         table_rows: dict[str, int] = {}
         for checkpoint in store.list_checkpoints(run_id):
@@ -239,6 +263,8 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            pseudonym_namespace=namespace if mapping is not None else None,
+            pseudomap_entries=pseudomap_entries,
         )
     except PipelineInterrupted:
         if store is not None:

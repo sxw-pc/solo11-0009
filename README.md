@@ -158,6 +158,28 @@ datasets:
 
 路径按数据集文件名或完整路径匹配；完整参数与边界见 [docs/policies.md](docs/policies.md)。
 
+### 假名命名空间（业务域隔离）
+
+默认所有数据集共用一个映射库 `data/pseudomap.sqlite`。在数据集规则上加可选键 `namespace`，可以把假名映射划分到独立的业务域命名空间：
+
+```yaml
+datasets:
+  - path: "crm.sqlite"
+    namespace: finance
+    tables:
+      customers:
+        columns:
+          full_name: {transformer: pseudonym}
+```
+
+- 同一命名空间内的数据集复用假名，授权场景下可跨库关联；
+- 不同命名空间各自使用独立的映射库（`data/pseudomap/<namespace>.sqlite`），token 按命名空间域分隔，相同原文在不同业务线的假名完全不同；
+- 不写 `namespace` 时沿用原有单库模式，历史映射数据与既有假名完全兼容；
+- 同一命名空间必须使用相同的 `pseudonym_key`，密钥不一致会在执行前报错；数据集指纹与命名空间的绑定登记在元数据库中，防止策略被篡改后偷换映射库；
+- 并发写同一命名空间的映射库由文件级互斥锁串行化；单空间映射条目超过 100 万时审计日志会写入容量告警。
+
+详见 [docs/policies.md](docs/policies.md#假名命名空间)。
+
 ## 常用命令
 
 ```bash
@@ -178,6 +200,9 @@ python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 # 用映射库还原某个假名 token
 python -m maskline reveal --token psn_xxxxxxxx
 
+# 还原某个命名空间下的假名 token
+python -m maskline reveal --namespace finance --token psn_xxxxxxxx
+
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
 ```
@@ -193,6 +218,7 @@ python -m maskline audit --verify
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。
+- **假名命名空间**：策略可为数据集指定 `namespace`，同空间复用假名、跨空间物理隔离且 token 域分隔；命名空间与数据集指纹、密钥指纹绑定登记，密钥不一致或偷换命名空间会在执行前拒绝；映射库路径仅允许工作区内受控位置。
 
 详细风险见 [docs/threat-model.md](docs/threat-model.md)。
 

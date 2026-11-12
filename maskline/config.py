@@ -14,7 +14,7 @@ from typing import Mapping
 
 import yaml
 
-from .utils import MasklineError, atomic_write_text
+from .utils import MasklineError, atomic_write_text, validate_namespace
 
 
 class ConfigError(MasklineError):
@@ -48,6 +48,20 @@ class Paths:
     @property
     def pseudomap_db(self) -> Path:
         return self.data_dir / "pseudomap.sqlite"
+    @property
+    def pseudomap_dir(self) -> Path:
+        """Directory holding one mapping database per pseudonym namespace."""
+        return self.data_dir / "pseudomap"
+
+    def pseudomap_path(self, namespace: str | None = None) -> Path:
+        """Mapping database path; namespaced stores stay under pseudomap_dir.
+
+        Namespaces are validated as safe identifiers, so callers can never
+        steer the mapping database outside the managed workspace directories.
+        """
+        if namespace is None:
+            return self.pseudomap_db
+        return self.pseudomap_dir / f"{validate_namespace(namespace, ConfigError)}.sqlite"
     @property
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
