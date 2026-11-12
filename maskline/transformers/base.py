@@ -23,6 +23,7 @@ class TransformContext:
     table: str = ""
     column: str = ""
     write_mapping: bool = True
+    run_id: str = ""
     @property
     def dry_run(self) -> bool:
         return not self.write_mapping

@@ -13,6 +13,7 @@ from .config import Paths, SecretStore
 from .detectors.engine import detect_inventory
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
+from .pipeline.cleanup import CleanupOptions, cleanup_dirty_resources
 from .pipeline.runner import PipelineError, execute_run
 from .pseudomap import PseudoMap, PseudoMapError
 from .registry import inspect_dataset
@@ -48,10 +49,30 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--batch-size", type=int, default=1000)
     run.add_argument("--sample-limit", type=int, default=200)
     run.add_argument("--dry-run", action="store_true", help="count only; write nothing")
+    run.add_argument(
+        "--no-auto-cleanup", action="store_true",
+        help="do not reclaim dirty resources left by previous abnormal exits",
+    )
     resume = sub.add_parser("resume", parents=[common], help="resume an interrupted run")
     resume.add_argument("--run-id", required=True)
     resume.add_argument("--batch-size", type=int, default=1000)
     resume.add_argument("--sample-limit", type=int, default=200)
+    resume.add_argument(
+        "--no-auto-cleanup", action="store_true",
+        help="do not reclaim dirty resources left by previous abnormal exits",
+    )
+    cleanup = sub.add_parser(
+        "cleanup", parents=[common],
+        help="reclaim resources left by killed/failed runs (idempotent)",
+    )
+    cleanup.add_argument("--dry-run", action="store_true", help="report only; delete nothing")
+    cleanup.add_argument(
+        "--min-free-mb", type=float, default=0,
+        help="low-disk mode: reclaim oldest dirt until this much free space exists",
+    )
+    cleanup.add_argument("--lock-grace-seconds", type=float, default=1.0)
+    cleanup.add_argument("--temp-grace-seconds", type=float, default=60.0)
+    cleanup.add_argument("--json", action="store_true", help="print a JSON report")
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
@@ -121,6 +142,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         dry_run=args.dry_run,
         output_path=args.output,
+        cleanup_on_start=not args.no_auto_cleanup,
     )
     print(
         f"run={result.run_id} rows={result.row_count} elapsed={result.elapsed_seconds:.3f}s"
@@ -169,11 +191,53 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         secrets_store=secrets_store,
         batch_size=args.batch_size,
         resume_run_id=args.run_id,
+        cleanup_on_start=not args.no_auto_cleanup,
     )
     artifacts = finalize_run(paths, inventory, policy, result, findings)
     print(f"resumed={result.run_id} rows={result.row_count}")
     print(f"output={result.output_path}")
     print(f"report={artifacts['report']['markdown']}")
+    return 0
+
+
+def _cmd_cleanup(args: argparse.Namespace) -> int:
+    import json
+
+    paths = _paths(args)
+    options = CleanupOptions(
+        dry_run=args.dry_run,
+        min_free_bytes=max(0, int(args.min_free_mb * (1 << 20))),
+        lock_grace_seconds=max(0.0, args.lock_grace_seconds),
+        temp_grace_seconds=max(0.0, args.temp_grace_seconds),
+    )
+    report = cleanup_dirty_resources(paths, options)
+    if args.json:
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+    if report.locked:
+        print("cleanup: another live cleanup process holds the lock; nothing done")
+        return 0
+    prefix = "cleanup (dry-run)" if report.dry_run else "cleanup"
+    print(
+        f"{prefix}: cleaned_runs={len(report.cleaned_run_ids)} "
+        f"targets={len(report.removed_targets)} sidecars={len(report.removed_sidecars)} "
+        f"orphans={len(report.removed_orphan_outputs)} "
+        f"checkpoint_runs={len(report.removed_orphan_checkpoint_runs)} "
+        f"map_usage={report.removed_mapping_usage} map_tokens={report.removed_mapping_tokens} "
+        f"stale_locks={len(report.removed_stale_locks)} "
+        f"reclaimed_bytes={report.reclaimed_bytes}"
+    )
+    if report.skipped_active_run_ids:
+        print("active runs preserved: " + ", ".join(sorted(report.skipped_active_run_ids)))
+    if report.low_disk:
+        print(
+            "low-disk mode: oldest dirty resources first "
+            f"(free={report.free_bytes_before} frozen={report.frozen_for_disk_space})"
+        )
+    for error in report.errors:
+        print(f"  warning: {error['path']}: {error['error']}", file=sys.stderr)
+    if report.failure_scene_path:
+        print(f"failure_scene={report.failure_scene_path}")
     return 0
 
 
@@ -218,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         "scan": _cmd_scan,
         "run": _cmd_run,
         "resume": _cmd_resume,
+        "cleanup": _cmd_cleanup,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
     }

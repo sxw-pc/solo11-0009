@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import os
+import signal
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,7 +20,9 @@ from ..registry import DatasetInventory, TableInfo
 from ..transformers import TransformContext
 from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
+from .cleanup import CleanupOptions, cleanup_dirty_resources
 from .errors import PipelineError, PipelineInterrupted
+from .locks import RunLock, host_name
 from .manifest import write_manifest
 from .steps import (
     create_target,
@@ -77,6 +82,10 @@ def _prepare_target(
             raise PipelineError(f"unknown run id: {run_id}")
         if record.status == "completed":
             raise PipelineError(f"run {run_id} is already completed")
+        if record.status in {"cleaned", "abandoned"}:
+            raise PipelineError(
+                f"run {run_id} was reclaimed by cleanup and is no longer resumable"
+            )
         if record.dataset_fingerprint != inventory.fingerprint:
             raise PipelineError("dataset content changed since the interrupted run")
         if record.policy_fingerprint != policy.fingerprint:
@@ -92,14 +101,18 @@ def _prepare_target(
     output = output.expanduser().resolve()
     if output == inventory.path.resolve():
         raise PipelineError("refusing to write the target over the source dataset")
-    create_target(inventory, output)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Record intent *before* creating the target database. A crash between the
+    # two steps then leaves an attributable run row whose dead lock proves the
+    # output is dirty, instead of an anonymous partial file.
     store.create_run(
         RunRecord(
             run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
             policy.fingerprint, str(output), "running", now, now,
+            pid=os.getpid(), host=host_name(),
         )
     )
+    create_target(inventory, output)
     return output
 
 
@@ -142,6 +155,37 @@ def _process_table(
     return after, rows_done, table_counts
 
 
+def _install_suspend_signals() -> list[tuple[int, Any]]:
+    """Translate SIGTERM into an orderly, resumable interruption.
+
+    The lock file is released by the kernel regardless, but marking the run
+    ``interrupted`` preserves it as a legitimate checkpoint for ``resume``.
+    SIGKILL cannot be intercepted and is handled by recovery via the dead lock.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return []
+    if not hasattr(signal, "SIGTERM"):
+        return []
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def _suspend(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, _suspend)
+    except (ValueError, OSError):  # pragma: no cover - restricted environments
+        return []
+    return [(signal.SIGTERM, previous)]
+
+
+def _restore_signals(saved: list[tuple[int, Any]]) -> None:
+    for signum, handler in saved:
+        try:
+            signal.signal(signum, handler)
+        except (ValueError, OSError):  # pragma: no cover
+            pass
+
+
 def execute_run(
     inventory: DatasetInventory,
     policy: Policy,
@@ -153,6 +197,8 @@ def execute_run(
     resume_run_id: str | None = None,
     output_path: str | Path | None = None,
     interrupt_after_batches: int | None = None,
+    cleanup_on_start: bool = True,
+    cleanup_options: CleanupOptions | None = None,
 ) -> RunResult:
     if batch_size < 1:
         raise PipelineError("batch_size must be positive")
@@ -164,9 +210,17 @@ def execute_run(
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
+    run_lock: RunLock | None = None
+    saved_signals: list[tuple[int, Any]] = []
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
+            run_lock = RunLock.acquire_for(paths.locks_dir, run_id)
+            saved_signals = _install_suspend_signals()
+            if cleanup_on_start:
+                options = copy.copy(cleanup_options) if cleanup_options else CleanupOptions()
+                options.protect_run_ids = set(options.protect_run_ids) | {run_id}
+                cleanup_dirty_resources(paths, options)
             store = CheckpointStore(paths.checkpoint_db)
             output = _prepare_target(
                 inventory, policy, paths, store, run_id, resume_run_id, output_path
@@ -178,7 +232,8 @@ def execute_run(
             target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
-                secrets=secrets_store, pseudomap=mapping, write_mapping=True
+                secrets=secrets_store, pseudomap=mapping, write_mapping=True,
+                run_id=run_id,
             )
         else:
             output = None
@@ -244,14 +299,26 @@ def execute_run(
         if store is not None:
             store.set_status(run_id, "interrupted")
         raise
-    except Exception:
+    except KeyboardInterrupt:
+        # Ctrl-C or SIGTERM: an intentional suspension, not dirty garbage.
         if store is not None:
-            store.set_status(run_id, "failed")
+            store.set_status(run_id, "interrupted")
+        raise PipelineInterrupted(run_id) from None
+    except Exception as exc:
+        if store is not None:
+            try:
+                store.record_error(run_id, type(exc).__name__, str(exc))
+                store.set_status(run_id, "failed")
+            except Exception:
+                pass
         raise
     finally:
+        _restore_signals(saved_signals)
         if target is not None:
             target.close()
         if mapping is not None:
             mapping.close()
         if store is not None:
             store.close()
+        if run_lock is not None:
+            run_lock.release()
