@@ -49,6 +49,15 @@ class Paths:
     def pseudomap_db(self) -> Path:
         return self.data_dir / "pseudomap.sqlite"
     @property
+    def rules_db(self) -> Path:
+        return self.data_dir / "rules.sqlite"
+    @property
+    def gray_dir(self) -> Path:
+        return self.data_dir / "gray"
+    @property
+    def gray_db(self) -> Path:
+        return self.data_dir / "gray_trials.sqlite"
+    @property
     def manifest_dir(self) -> Path:
         return self.data_dir / "manifests"
     @property

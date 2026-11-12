@@ -1,0 +1,29 @@
+# Example rule pack for maskline gray-release trials.
+# Edit and register it with:
+#   python -m maskline rules add --file rules/example-rules.yaml --actor <you>
+#   python -m maskline gray run --rules-version example-v2 --dataset <dataset>
+#
+# This file is NOT loaded automatically; existing policies and built-in rules
+# stay unchanged until a version is explicitly created and rolled back.
+
+version: 1
+rule_version: "example-v2"
+name: "example detector adjustments"
+description: "Show pattern overrides, a disabled detector and a new detector."
+base: "builtin-v1"
+
+detectors:
+  # Override the mobile-phone regex for this version only.
+  mobile_phone:
+    pattern: '(?<!\d)1[3-9]\d{9}(?!\d)'
+    validator: none
+
+  # Disable IPv4 detection in this version.
+  ipv4:
+    disabled: true
+
+  # Add a synthetic badge detector used by the documentation/tests.
+  badge:
+    kind: regex
+    pattern: '(?<!\d)BADGE-\d{6}(?!\d)'
+    require_fullmatch: true

@@ -13,7 +13,28 @@ from .detectors.engine import scan_inventory
 from .policies import Policy
 from .registry import Catalog, DatasetInventory, inspect_dataset
 from .report import generate_report
+from .rules import RuleSet
 from .utils import MasklineError
+
+
+def resolve_rule_set(
+    paths: Any, *, version: str | None = None, create: bool = False
+) -> RuleSet:
+    """Resolve a specific rule version, or the active formal version.
+
+    ``create=False`` keeps dry-runs write-free: a missing catalog means the
+    built-in rule set, and no schema is materialised.
+    """
+    from .rule_registry import RuleCatalog
+
+    with RuleCatalog(paths.rules_db, audit_path=paths.audit_path, create=create) as catalog:
+        if version is not None:
+            return catalog.get_version(version).rule_set
+        return catalog.active_rule_set()
+
+
+def resolve_active_rule_set(paths: Any, *, create: bool = False) -> RuleSet:
+    return resolve_rule_set(paths, version=None, create=create)
 
 
 @dataclass
@@ -24,7 +45,11 @@ class ScanSummary:
 
 
 def scan_paths(
-    targets: Iterable[str | Path], paths: Any, sample_limit: int = 200
+    targets: Iterable[str | Path],
+    paths: Any,
+    sample_limit: int = 200,
+    rule_set: RuleSet | None = None,
+    rule_version: str | None = None,
 ) -> list[ScanSummary]:
     files: list[Path] = []
     for target in targets:
@@ -32,12 +57,17 @@ def scan_paths(
     unique = sorted({path.resolve() for path in files}, key=lambda path: path.as_posix())
     if not unique:
         raise MasklineError("no supported dataset files found")
+    active_rule_set = rule_set or resolve_rule_set(
+        paths, version=rule_version, create=True
+    )
     summaries: list[ScanSummary] = []
     with Catalog(paths.meta_db) as catalog:
         for path in unique:
             inventory = inspect_dataset(path)
             newly = catalog.register(inventory)
-            findings = scan_inventory(inventory, catalog, sample_limit=sample_limit)
+            findings = scan_inventory(
+                inventory, catalog, sample_limit=sample_limit, rule_set=active_rule_set
+            )
             summaries.append(ScanSummary(inventory, newly, findings))
     return summaries
 

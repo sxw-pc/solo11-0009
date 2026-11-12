@@ -172,12 +172,24 @@ class Catalog:
                 validate_rate REAL NOT NULL DEFAULT 0,
                 sample_size INTEGER NOT NULL DEFAULT 0,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
+                rule_version TEXT NOT NULL DEFAULT 'builtin-v1',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_fingerprint, table_name, column_name)
             );
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        columns = [
+            row[1] for row in self.conn.execute("PRAGMA table_info(findings)").fetchall()
+        ]
+        if "rule_version" not in columns:
+            self.conn.execute(
+                "ALTER TABLE findings ADD COLUMN rule_version "
+                "TEXT NOT NULL DEFAULT 'builtin-v1'"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -239,8 +251,8 @@ class Catalog:
             INSERT INTO findings (
                 dataset_fingerprint, table_name, column_name, sensitive_type,
                 confidence, score, hit_rate, validate_rate, sample_size,
-                candidates_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                candidates_json, rule_version, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dataset_fingerprint, table_name, column_name) DO UPDATE SET
                 sensitive_type=excluded.sensitive_type,
                 confidence=excluded.confidence,
@@ -249,6 +261,7 @@ class Catalog:
                 validate_rate=excluded.validate_rate,
                 sample_size=excluded.sample_size,
                 candidates_json=excluded.candidates_json,
+                rule_version=excluded.rule_version,
                 updated_at=excluded.updated_at
             """,
             (
@@ -262,6 +275,7 @@ class Catalog:
                 float(record.get("validate_rate", 0.0)),
                 int(record.get("sample_size", 0)),
                 json.dumps(record.get("candidates", []), ensure_ascii=False),
+                record.get("rule_version", "builtin-v1"),
                 _now(),
             ),
         )

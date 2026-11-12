@@ -15,6 +15,7 @@
 **是：**
 
 - 本地数据集的敏感字段发现引擎（正则 + 校验位 + 中文词典启发）
+- 可版本化、可灰度试跑与回滚的探测器规则集
 - 基于 YAML 的声明式脱敏策略执行器
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
@@ -52,6 +53,8 @@ pytest -q
 - `data/out/demo.masked.sqlite`、`data/out/leads.masked.sqlite`：独立目标库
 - `data/pseudomap.sqlite`：假名映射库（等同密钥，请单独保管）
 - `data/checkpoints.sqlite`：运行与断点记录
+- `data/rules.sqlite`：规则版本与正式版本状态（首次扫描时创建）
+- `data/gray/`、`data/gray_trials.sqlite`：灰度试跑临时快照与索引（仅在执行灰度命令时创建）
 - `reports/<run_id>.md`、`reports/<run_id>.json`：报告
 - `audit/audit.jsonl` 与 `audit/audit.jsonl.head`：追加式审计链与锚点
 
@@ -99,6 +102,10 @@ maskline/
 │   ├── config.py            # 路径与 MASKLINE_SECRET_FILE 密钥加载
 │   ├── dataset_io.py        # SQLite / CSV 只读访问
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
+│   ├── rules.py             # 规则包解析、版本快照、探测器编译
+│   ├── rule_registry.py     # 规则版本、权限、灰度范围、回滚状态
+│   ├── gray.py              # 隔离灰度试跑、临时快照、过期清理
+│   ├── resources.py         # 试跑 CPU affinity / RLIMIT_AS 限流
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
@@ -110,8 +117,10 @@ maskline/
 │   ├── fixturegen.py        # 固定种子合成数据
 │   └── demo.py              # 一键演示编排
 ├── policies/example.yaml
+├── rules/example-rules.yaml
 ├── scripts/make_fixture.py
 ├── docs/policies.md
+├── docs/rules.md
 ├── docs/threat-model.md
 └── tests/
 ```
@@ -180,7 +189,25 @@ python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
+
+# 登记规则版本（可选，不修改已有策略/规则文件）
+python -m maskline rules add --file rules/example-rules.yaml --actor alice
+python -m maskline rules list
+
+# 对单个测试数据集做隔离灰度试跑（默认限 2 核 / 512 MB，快照保留 7 天）
+python -m maskline gray run --rules-version example-v2 \
+  --dataset data/raw/demo.sqlite --actor alice
+
+# 查看/清理灰度临时快照
+python -m maskline gray list
+python -m maskline gray cleanup
+
+# 一键回滚：之后所有正式 scan/run/resume/demo 自动使用指定历史版本
+python -m maskline rules rollback --version example-v2 --actor alice
+python -m maskline rules rollback --version builtin-v1 --actor alice
 ```
+
+规则版本、灰度范围、权限、资源限流与审计事件的完整说明见 [docs/rules.md](docs/rules.md)。
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
 
@@ -191,6 +218,9 @@ python -m maskline audit --verify
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
 - **源数据只读**：拒绝把输出路径指向源文件。
+- **规则版本**：正式任务自动使用 `data/rules.sqlite` 中的当前版本；灰度试跑只写 `data/gray/` 独立快照，不占用正式 checkpoints / 映射库 / meta 结果。
+- **灰度清理**：试跑快照默认保留 7 天，过期后在灰度命令中自动清理；失败试跑会立即删除本次临时资源。
+- **权限**：只有规则版本创建者能调整灰度范围或回滚到该版本。
 - **dry-run** 不创建任何运行期文件。
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。
 
@@ -202,7 +232,7 @@ python -m maskline audit --verify
 pytest -q
 ```
 
-测试覆盖校验算法正反例、字段发现与误报、六类转换器、端到端执行、dry-run、断点续跑、幂等、假名映射、审计篡改定位、报告告警等。全部测试与演示均不需要网络。
+测试覆盖校验算法正反例、字段发现与误报、六类转换器、端到端执行、dry-run、断点续跑、幂等、假名映射、审计篡改定位、报告告警，以及规则版本回滚、灰度隔离、异常清理、保留期清理和资源限流。全部测试与演示均不需要网络。
 
 ## 常见问题
 

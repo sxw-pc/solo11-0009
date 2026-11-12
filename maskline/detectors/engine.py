@@ -7,10 +7,11 @@ from typing import Any, Iterable
 
 from ..dataset_io import read_column_samples
 from ..registry import Catalog, DatasetInventory
+from ..rules import BUILTIN_VERSION, RuleSet, builtin_rule_set
 from .base import CONFIDENCE_LOW, Candidate, clean_text_values
 from .checksums import id_card_valid
-from .lexicon import LEXICON_DETECTORS
-from .patterns import DETECTORS
+from .lexicon import LEXICON_DETECTORS  # noqa: F401 - kept as a public re-export
+from .patterns import DETECTORS  # noqa: F401 - kept as a public re-export
 
 PRIORITY = {
     "id_card": 0,
@@ -35,6 +36,7 @@ class DetectionResult:
     hit_rate: float
     validate_rate: float
     candidates: tuple[Candidate, ...] = field(default_factory=tuple)
+    rule_version: str = BUILTIN_VERSION
 
     def to_record(self, dataset_fingerprint: str, table: str, column: str) -> dict[str, Any]:
         return {
@@ -48,6 +50,7 @@ class DetectionResult:
             "validate_rate": self.validate_rate,
             "sample_size": self.sample_size,
             "candidates": [item.to_dict() for item in self.candidates],
+            "rule_version": self.rule_version,
         }
 
 
@@ -77,13 +80,21 @@ def _suppress_overlaps(candidates: list[Candidate]) -> list[Candidate]:
 
 
 def analyze_values(
-    values: Iterable[Any], sample_limit: int = 200, table: str = "", column: str = ""
+    values: Iterable[Any],
+    sample_limit: int = 200,
+    table: str = "",
+    column: str = "",
+    rule_set: RuleSet | None = None,
 ) -> DetectionResult:
+    active_rule_set = rule_set or builtin_rule_set()
     sample = clean_text_values(values)[:sample_limit]
     if not sample:
-        return DetectionResult(table, column, 0, None, "none", 0.0, 0.0, 0.0)
+        return DetectionResult(
+            table, column, 0, None, "none", 0.0, 0.0, 0.0,
+            rule_version=active_rule_set.version,
+        )
     candidates: list[Candidate] = []
-    for detector in (*DETECTORS, *LEXICON_DETECTORS):
+    for detector in active_rule_set.detectors:
         candidate = detector.evaluate(sample)
         if candidate is not None and candidate.score > 0:
             candidates.append(candidate)
@@ -101,6 +112,7 @@ def analyze_values(
             hit_rate=best.hit_rate if best else 0.0,
             validate_rate=best.validate_rate if best else 0.0,
             candidates=tuple(candidates),
+            rule_version=active_rule_set.version,
         )
     return DetectionResult(
         table=table,
@@ -112,19 +124,33 @@ def analyze_values(
         hit_rate=best.hit_rate,
         validate_rate=best.validate_rate,
         candidates=tuple(candidates),
+        rule_version=active_rule_set.version,
     )
 
 
 def analyze_column(
-    values: Iterable[Any], sample_limit: int = 200, table: str = "", column: str = ""
+    values: Iterable[Any],
+    sample_limit: int = 200,
+    table: str = "",
+    column: str = "",
+    rule_set: RuleSet | None = None,
 ) -> DetectionResult:
-    return analyze_values(values, sample_limit=sample_limit, table=table, column=column)
+    return analyze_values(
+        values,
+        sample_limit=sample_limit,
+        table=table,
+        column=column,
+        rule_set=rule_set,
+    )
 
 
 def detect_inventory(
-    inventory: DatasetInventory, sample_limit: int = 200
+    inventory: DatasetInventory,
+    sample_limit: int = 200,
+    rule_set: RuleSet | None = None,
 ) -> list[dict[str, Any]]:
     """Score every column without writing anything (used by dry-run and scans)."""
+    active_rule_set = rule_set or builtin_rule_set()
     findings: list[dict[str, Any]] = []
     for table in inventory.tables:
         for column in table.columns:
@@ -132,7 +158,11 @@ def detect_inventory(
                 inventory.path, inventory.kind, table.name, column.name, sample_limit
             )
             result = analyze_values(
-                samples, sample_limit=sample_limit, table=table.name, column=column.name
+                samples,
+                sample_limit=sample_limit,
+                table=table.name,
+                column=column.name,
+                rule_set=active_rule_set,
             )
             findings.append(
                 result.to_record(inventory.fingerprint, table.name, column.name)
@@ -141,10 +171,15 @@ def detect_inventory(
 
 
 def scan_inventory(
-    inventory: DatasetInventory, catalog: Catalog, sample_limit: int = 200
+    inventory: DatasetInventory,
+    catalog: Catalog,
+    sample_limit: int = 200,
+    rule_set: RuleSet | None = None,
 ) -> list[dict[str, Any]]:
     """Sample every column, score it, persist findings, and return the rows."""
-    findings = detect_inventory(inventory, sample_limit=sample_limit)
+    findings = detect_inventory(
+        inventory, sample_limit=sample_limit, rule_set=rule_set
+    )
     for record in findings:
         catalog.save_finding(record)
     return findings

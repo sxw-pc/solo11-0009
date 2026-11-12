@@ -1,9 +1,13 @@
-"""Heuristic Chinese person-name and address detectors."""
+"""Heuristic Chinese person-name and address detectors.
+
+The surname lexicon and matching patterns are exposed as detector attributes so
+rule versions can snapshot and adjust them without editing Python source.
+"""
 
 from __future__ import annotations
 
 import re
-from typing import Sequence
+from typing import Sequence, Set
 
 from .base import Candidate, score_candidate
 
@@ -33,11 +37,21 @@ ADDRESS_RE = re.compile(
 class PersonNameDetector:
     sensitive_type = "person_name"
 
+    def __init__(
+        self,
+        pattern: re.Pattern[str] | str = NAME_RE,
+        surnames: Sequence[str] | Set[str] | str | None = None,
+        *,
+        flags: int = 0,
+    ) -> None:
+        self.pattern = re.compile(pattern, flags) if isinstance(pattern, str) else pattern
+        self.surnames = set(surnames) if surnames is not None else set(SURNAMES)
+
     def evaluate(self, values: Sequence[str]) -> Candidate | None:
         matches = [
             value
             for value in values
-            if NAME_RE.fullmatch(value) and value[0] in SURNAMES
+            if self.pattern.fullmatch(value) and value and value[0] in self.surnames
         ]
         return score_candidate(self.sensitive_type, len(values), matches)
 
@@ -45,11 +59,21 @@ class PersonNameDetector:
 class AddressDetector:
     sensitive_type = "address"
 
+    def __init__(
+        self,
+        pattern: re.Pattern[str] | str = ADDRESS_RE,
+        *,
+        min_length: int = 4,
+        flags: int = 0,
+    ) -> None:
+        self.pattern = re.compile(pattern, flags) if isinstance(pattern, str) else pattern
+        self.min_length = min_length
+
     def evaluate(self, values: Sequence[str]) -> Candidate | None:
         matches = [
             value
             for value in values
-            if len(value) >= 4 and ADDRESS_RE.search(value)
+            if len(value) >= self.min_length and self.pattern.search(value)
         ]
         return score_candidate(self.sensitive_type, len(values), matches)
 
