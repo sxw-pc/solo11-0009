@@ -9,6 +9,11 @@ from typing import Any
 
 from .config import Paths
 from .dataset_io import iter_csv_tuples, iter_table_rows
+from .overrides import (
+    FORCE_NOT_SENSITIVE,
+    FORCE_SENSITIVE,
+    OverrideApplication,
+)
 from .policies import DatasetRule, Policy
 from .registry import DatasetInventory, TableInfo
 from .utils import atomic_write_text, quote_ident, sqlite_connect_readonly
@@ -16,6 +21,11 @@ from .utils import atomic_write_text, quote_ident, sqlite_connect_readonly
 REDACTED = "[源值已隐藏]"
 UNMASKED = "[未脱敏，已隐藏]"
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低", "none": "无"}
+TYPE_LABELS = {"manual": "人工指定"}
+OVERRIDE_LABELS = {
+    FORCE_SENSITIVE: "强制敏感",
+    FORCE_NOT_SENSITIVE: "强制非敏感",
+}
 TRANSFORMER_LABELS = {
     "mask": "遮蔽",
     "hash": "HMAC 哈希",
@@ -107,6 +117,46 @@ def _cell(value: Any) -> str:
     return text if text != "" else '""'
 
 
+def _type_label(value: str | None) -> str:
+    if not value:
+        return "—"
+    return TYPE_LABELS.get(value, value)
+
+
+def _policy_conflicts(
+    rule: DatasetRule, findings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """force_not_sensitive verdicts that contradict a configured transform.
+
+    These are warnings only: execution deliberately keeps the policy transform
+    because under-masking is not an acceptable failure mode.
+    """
+    conflicts: list[dict[str, Any]] = []
+    for finding in findings:
+        if finding.get("override_verdict") != FORCE_NOT_SENSITIVE:
+            continue
+        table_policy = rule.tables.get(finding["table_name"])
+        if table_policy is None or finding["column_name"] not in table_policy.columns:
+            continue
+        detail = table_policy.columns[finding["column_name"]]
+        conflicts.append(
+            {
+                "table_name": finding["table_name"],
+                "column_name": finding["column_name"],
+                "transformer": detail.transformer,
+                "verdict": finding["override_verdict"],
+                "reason": finding.get("override_reason", ""),
+                "operator": finding.get("override_operator"),
+                "override_at": finding.get("override_at"),
+                "message": (
+                    "人工裁定为非敏感，但策略仍配置了脱敏；"
+                    "为遵守“宁多脱不漏脱”，本次运行仍然执行脱敏。"
+                ),
+            }
+        )
+    return conflicts
+
+
 def _markdown(
     inventory: DatasetInventory,
     policy: Policy,
@@ -114,8 +164,10 @@ def _markdown(
     findings: list[dict[str, Any]],
     samples: dict[str, list[dict[str, Any]]],
     warnings: list[dict[str, Any]],
+    override_application: OverrideApplication | None,
 ) -> str:
     rule = policy.for_dataset(inventory.path)
+    conflicts = _policy_conflicts(rule, findings)
     applied = {
         (table, column): detail
         for table, table_policy in rule.tables.items()
@@ -137,8 +189,8 @@ def _markdown(
         "",
         "## 字段发现",
         "",
-        "| 表 | 列 | 建议类型 | 置信度 | 得分 | 命中率 | 校验通过率 | 已配置策略 |",
-        "|---|---|---|---|---:|---:|---:|---|",
+        "| 表 | 列 | 建议类型 | 置信度 | 得分 | 命中率 | 校验通过率 | 人工裁定 | 已配置策略 |",
+        "|---|---|---|---|---:|---:|---:|---|---|",
     ]
     for finding in findings:
         key = (finding["table_name"], finding["column_name"])
@@ -147,12 +199,80 @@ def _markdown(
             f"{detail.transformer}" if detail else "—"
         )
         confidence = CONFIDENCE_LABELS.get(finding["confidence"], finding["confidence"])
+        override_mark = OVERRIDE_LABELS.get(finding.get("override_verdict"), "—")
         lines.append(
             f"| {_cell(finding['table_name'])} | {_cell(finding['column_name'])} | "
-            f"{_cell(finding['sensitive_type'] or '—')} | {confidence} | "
+            f"{_cell(_type_label(finding['sensitive_type']))} | {confidence} | "
             f"{finding['score']:.3f} | {finding['hit_rate']:.1%} | "
-            f"{finding['validate_rate']:.1%} | {configured} |"
+            f"{finding['validate_rate']:.1%} | {override_mark} | {configured} |"
         )
+    applied_overrides = (
+        override_application.applied if override_application is not None else []
+    )
+    unmatched_overrides = (
+        override_application.unmatched if override_application is not None else []
+    )
+    lines.extend(
+        [
+            "",
+            "## 人工裁定",
+            "",
+        ]
+    )
+    if applied_overrides:
+        lines.append("| 表 | 列 | 裁定 | 理由 | 操作者 | 时间 | 检测器原结论 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for item in applied_overrides:
+            detected = (
+                f"{_type_label(item.detected_sensitive_type)} / "
+                f"{CONFIDENCE_LABELS.get(item.detected_confidence, item.detected_confidence)} "
+                f"({item.detected_score:.3f})"
+            )
+            lines.append(
+                f"| {_cell(item.entry.table)} | {_cell(item.entry.column)} | "
+                f"{OVERRIDE_LABELS.get(item.entry.verdict, item.entry.verdict)} | "
+                f"{_cell(item.entry.reason)} | "
+                f"{_cell(findings_by_key_operator(findings, item.entry.table, item.entry.column))} | "
+                f"{_cell(findings_by_key_at(findings, item.entry.table, item.entry.column))} | "
+                f"{_cell(detected)} |"
+            )
+    else:
+        lines.append("无。本次扫描没有人工裁定生效。")
+    lines.extend(["", "## 未匹配的人工裁定", ""])
+    if unmatched_overrides:
+        lines.append("| 数据集 | 表 | 列 | 裁定 | 未匹配原因 |")
+        lines.append("|---|---|---|---|---|")
+        for item in unmatched_overrides:
+            dataset = item.entry.dataset_pattern
+            lines.append(
+                f"| {_cell(dataset)} | {_cell(item.entry.table)} | "
+                f"{_cell(item.entry.column)} | "
+                f"{OVERRIDE_LABELS.get(item.entry.verdict, item.entry.verdict)} | "
+                f"{_cell(item.reason)} |"
+            )
+        lines.append("")
+        lines.append(
+            "> 以上裁定未命中当前表结构，通常意味着列/表已被重命名或删除。"
+            "请更新 overrides 文件；旧裁定不会静默失效。"
+        )
+    else:
+        lines.append("无。所有人工裁定都匹配到了实际列。")
+    lines.extend(["", "## 人工裁定与策略冲突", ""])
+    if conflicts:
+        lines.append("| 表 | 列 | 策略转换器 | 处理 |")
+        lines.append("|---|---|---|---|")
+        for conflict in conflicts:
+            lines.append(
+                f"| {_cell(conflict['table_name'])} | {_cell(conflict['column_name'])} | "
+                f"`{conflict['transformer']}` | {conflict['message']} |"
+            )
+        lines.append("")
+        lines.append(
+            "> 冲突不改变执行结果：策略配置优先，脱敏仍会执行。"
+            "如需真正取消脱敏，请同步修改策略 YAML。"
+        )
+    else:
+        lines.append("无。")
     lines.extend(
         [
             "",

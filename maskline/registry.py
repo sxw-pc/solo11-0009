@@ -172,12 +172,41 @@ class Catalog:
                 validate_rate REAL NOT NULL DEFAULT 0,
                 sample_size INTEGER NOT NULL DEFAULT 0,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
+                detected_sensitive_type TEXT,
+                detected_confidence TEXT,
+                detected_score REAL,
+                override_verdict TEXT,
+                override_reason TEXT,
+                override_operator TEXT,
+                override_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_fingerprint, table_name, column_name)
             );
             """
         )
+        self._migrate_findings()
         self.conn.commit()
+
+    def _migrate_findings(self) -> None:
+        """Add manual-adjudication columns to pre-existing workspaces."""
+        columns = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(findings)").fetchall()
+        }
+        additions = {
+            "detected_sensitive_type": "TEXT",
+            "detected_confidence": "TEXT",
+            "detected_score": "REAL",
+            "override_verdict": "TEXT",
+            "override_reason": "TEXT",
+            "override_operator": "TEXT",
+            "override_at": "TEXT",
+        }
+        for name, declared_type in additions.items():
+            if name not in columns:
+                self.conn.execute(
+                    f"ALTER TABLE findings ADD COLUMN {name} {declared_type}"
+                )
 
     def close(self) -> None:
         self.conn.close()
@@ -239,8 +268,10 @@ class Catalog:
             INSERT INTO findings (
                 dataset_fingerprint, table_name, column_name, sensitive_type,
                 confidence, score, hit_rate, validate_rate, sample_size,
-                candidates_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                candidates_json, detected_sensitive_type, detected_confidence,
+                detected_score, override_verdict, override_reason,
+                override_operator, override_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dataset_fingerprint, table_name, column_name) DO UPDATE SET
                 sensitive_type=excluded.sensitive_type,
                 confidence=excluded.confidence,
@@ -249,6 +280,13 @@ class Catalog:
                 validate_rate=excluded.validate_rate,
                 sample_size=excluded.sample_size,
                 candidates_json=excluded.candidates_json,
+                detected_sensitive_type=excluded.detected_sensitive_type,
+                detected_confidence=excluded.detected_confidence,
+                detected_score=excluded.detected_score,
+                override_verdict=excluded.override_verdict,
+                override_reason=excluded.override_reason,
+                override_operator=excluded.override_operator,
+                override_at=excluded.override_at,
                 updated_at=excluded.updated_at
             """,
             (
@@ -262,6 +300,17 @@ class Catalog:
                 float(record.get("validate_rate", 0.0)),
                 int(record.get("sample_size", 0)),
                 json.dumps(record.get("candidates", []), ensure_ascii=False),
+                record.get("detected_sensitive_type"),
+                record.get("detected_confidence"),
+                (
+                    float(record["detected_score"])
+                    if record.get("detected_score") is not None
+                    else None
+                ),
+                record.get("override_verdict"),
+                record.get("override_reason"),
+                record.get("override_operator"),
+                record.get("override_at"),
                 _now(),
             ),
         )

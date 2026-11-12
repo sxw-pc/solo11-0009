@@ -105,7 +105,12 @@ class Policy:
         }
 
 
-def _path_matches(pattern: str, path: Path) -> bool:
+def path_matches(pattern: str, path: Path) -> bool:
+    """Match a dataset path the same way policy ``path`` entries are matched.
+
+    A pattern is compared against the file name, POSIX path and absolute path,
+    supports shell-style wildcards, and may also match a path suffix.
+    """
     if not pattern or not pattern.strip():
         return False
     normalized = pattern.replace("\\", "/")
@@ -120,6 +125,11 @@ def _path_matches(pattern: str, path: Path) -> bool:
         or fnmatch.fnmatchcase(candidate, f"*{normalized}")
         for candidate in variants
     )
+
+
+def _path_matches(pattern: str, path: Path) -> bool:
+    # Backwards-compatible private alias kept for in-module callers.
+    return path_matches(pattern, path)
 
 
 def _expect_mapping(value: Any, where: str) -> Mapping[str, Any]:
