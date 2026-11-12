@@ -57,6 +57,8 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    from .fingerprint.cli import add_fingerprint_parsers
+    add_fingerprint_parsers(sub)
     return parser
 
 
@@ -221,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
     }
+    from .fingerprint.cli import FP_HANDLERS
+    handlers.update(FP_HANDLERS)
     try:
         return handlers[args.command](args)
     except (MasklineError, PolicyError, PipelineError, PseudoMapError, FileNotFoundError) as exc:

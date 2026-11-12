@@ -1,0 +1,44 @@
+# 交付指纹配置示例（同一逻辑数据集的所有交付复用本文件，
+# 批次差异只来自每次交付独立派生的子密钥，见 docs/fingerprinting.md）。
+dataset_name: customer_leads
+
+# 行身份首选锚；永不修改。通常是全局假名化后的客户 id。
+key_column: customer_id
+
+# 假名 / 标识 / 连接键：指纹永不触碰，保证全库假名映射统一。
+# 其中取值唯一的列（如 account_id）会自动成为键列被裁时的后备锚。
+protected_columns:
+  - account_id
+  - advisor_id
+
+# 主通道：非受保护数值列。quantum 留空则按数据跨度自动选网格（约 1%）。
+# 单格位移不超过一个 quantum；integer: true 保证只产生整数位移。
+numeric_columns:
+  - name: age
+    quantum: 2.0
+    mark_rate: 0.5
+    integer: true
+  - name: annual_income_k
+    mark_rate: 0.5
+    integer: true
+  - name: credit_score
+    mark_rate: 0.5
+  - name: monthly_spend
+    mark_rate: 0.5
+  - name: visit_count
+    quantum: 1.0
+    mark_rate: 0.4
+    integer: true
+
+# 金丝雀行可使用的分类列与每批插入数量。
+canary_columns:
+  - city
+  - tier
+  - channel
+canary_count: 12
+
+# 行序辅助通道；洗牌后自动失效且不做伪证。
+embed_row_order: true
+
+# 低于该行数统计功效不足，拒绝植入。
+min_rows: 50

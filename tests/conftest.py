@@ -44,3 +44,6 @@ def make_policy(tmp_path):
         path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
         return load_policy(path)
     return factory
+
+# Fingerprint subsystem fixtures (kept in a separate helper module).
+from fp_fixtures import master_key, synthetic_table, fingerprint_config  # noqa: E402,F401

@@ -184,6 +184,30 @@ python -m maskline audit --verify
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。
 
+## 交付指纹（数据水印）
+
+对每次对外交付的脱敏产物植入只有本方能离线验证的溯源标记，事后可对疑似泄露的文件/库做带置信度的批次归因，扛行过滤（删 30%+）、列裁剪（含主键列被裁）、格式/类型转换与多批混合。设计细节见 [`docs/fingerprinting.md`](docs/fingerprinting.md)，配置示例见 [`policies/fingerprint-example.yaml`](policies/fingerprint-example.yaml)。
+
+```bash
+# 生成独立的指纹主密钥（0600；与假名密钥分开保管）
+python -m maskline fp-keygen --workspace .
+
+# 交付前植入指纹，自动写封存清单并向审计链追加留档
+python -m maskline fp-embed --workspace . \
+  --config policies/fingerprint-example.yaml \
+  --input data/out/leads.masked.csv --output deliver/vendor-A.csv \
+  --delivery-id vendor-A --recipient 外包商甲
+
+# 事后离线归因（csv / jsonl / sqlite；不回读源数据或假名映射库）
+python -m maskline fp-verify --workspace . --suspect leak.csv --json report.json
+
+# 清单与审计链对账；导出气隙验证包（默认不含密钥）
+python -m maskline fp-reconcile --workspace .
+python -m maskline fp-bundle --workspace . --out bundle.zip
+```
+
+硬保证：受保护假名列永不修改，同一原始值的假名在全库与跨批次间保持统一；清单仅存 HMAC/哈希，不含明文与种子，主密钥无法从产物或清单反推；从未交付的干净数据明确判定 `no_match`（退出码 3）。
+
 ## 幂等、断点与安全边界
 
 - **登记幂等**：同一内容指纹只登记一次。

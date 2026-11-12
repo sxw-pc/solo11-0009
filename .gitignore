@@ -14,6 +14,12 @@ audit/
 secret.txt
 .env
 .maskline-secret*
+# Fingerprint master keys and per-workspace fingerprint state (manifests are
+# operational records, not source; keys are secrets).
+*.key
+fingerprints/
+# Acceptance scratch workspace
+tmp_accept/
 # Python
 __pycache__/
 *.py[cod]
