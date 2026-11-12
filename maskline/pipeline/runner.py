@@ -1,9 +1,8 @@
-"""Batch-oriented, resumable execution into an independent target database."""
+"""Batch-oriented, resumable execution into a pluggable output target."""
 
 from __future__ import annotations
 
 import copy
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,18 +14,11 @@ from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
 from ..registry import DatasetInventory, TableInfo
 from ..transformers import TransformContext
-from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
 from .manifest import write_manifest
-from .steps import (
-    create_target,
-    insert_batch,
-    merge_counts,
-    new_run_id,
-    source_batches,
-    transform_row,
-)
+from .steps import merge_counts, new_run_id, source_batches, transform_row
+from .targets import OutputTarget, make_target, target_for_resume
 
 
 @dataclass
@@ -45,6 +37,7 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    target_kind: str = "sqlite"
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -62,6 +55,12 @@ def _requires_secret(rule: DatasetRule) -> bool:
     )
 
 
+def _default_output(paths: Paths, inventory: DatasetInventory, target_format: str) -> Path:
+    if target_format == "csv":
+        return paths.out_dir / f"{inventory.path.stem}.masked"
+    return paths.out_dir / f"{inventory.path.stem}.masked.sqlite"
+
+
 def _prepare_target(
     inventory: DatasetInventory,
     policy: Policy,
@@ -70,7 +69,8 @@ def _prepare_target(
     run_id: str,
     resume_run_id: str | None,
     output_path: str | Path | None,
-) -> Path:
+    target_format: str,
+) -> tuple[OutputTarget, Path]:
     if resume_run_id:
         record = store.get_run(run_id)
         if record is None:
@@ -82,17 +82,16 @@ def _prepare_target(
         if record.policy_fingerprint != policy.fingerprint:
             raise PipelineError("policy changed since the interrupted run")
         output = Path(record.output_path)
-        if not output.exists():
-            raise PipelineError(f"target database is missing: {output}")
+        target = target_for_resume(inventory, output)
+        target.open_for_resume()
         store.set_status(run_id, "running")
-        return output
-    output = Path(output_path) if output_path else (
-        paths.out_dir / f"{inventory.path.stem}.masked.sqlite"
+        return target, output
+    output = Path(output_path) if output_path else _default_output(
+        paths, inventory, target_format
     )
     output = output.expanduser().resolve()
-    if output == inventory.path.resolve():
-        raise PipelineError("refusing to write the target over the source dataset")
-    create_target(inventory, output)
+    target = make_target(target_format, inventory, output)
+    target.create()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     store.create_run(
         RunRecord(
@@ -100,7 +99,7 @@ def _prepare_target(
             policy.fingerprint, str(output), "running", now, now,
         )
     )
-    return output
+    return target, output
 
 
 def _process_table(
@@ -108,7 +107,7 @@ def _process_table(
     table: TableInfo,
     table_policy: Any,
     checkpoint: TableCheckpoint | None,
-    target: sqlite3.Connection | None,
+    target: OutputTarget | None,
     store: CheckpointStore | None,
     context: TransformContext,
     mapping: PseudoMap | None,
@@ -126,8 +125,7 @@ def _process_table(
             for rowid, values in batch
         ]
         if target is not None:
-            with target:
-                insert_batch(target, table, transformed)
+            target.write_batch(table, transformed, rows_done + len(transformed))
         if mapping is not None:
             mapping.commit()
         rows_done += len(transformed)
@@ -139,6 +137,8 @@ def _process_table(
             raise PipelineInterrupted(run_id)
     if store is not None and checkpoint is None:
         store.save_checkpoint(run_id, table.name, after, rows_done, table_counts)
+    if target is not None:
+        target.finish_table(table)
     return after, rows_done, table_counts
 
 
@@ -152,8 +152,15 @@ def execute_run(
     dry_run: bool = False,
     resume_run_id: str | None = None,
     output_path: str | Path | None = None,
+    target_format: str = "sqlite",
     interrupt_after_batches: int | None = None,
 ) -> RunResult:
+    """Run the masking pipeline.
+
+    ``target_format`` selects the output target for new runs ("sqlite" or
+    "csv"); it is ignored when resuming, where the target kind recorded by
+    the interrupted run is recovered from its output path.
+    """
     if batch_size < 1:
         raise PipelineError("batch_size must be positive")
     rule = policy.validate_against(inventory)
@@ -162,21 +169,20 @@ def execute_run(
     started = time.monotonic()
     run_id = resume_run_id or new_run_id()
     store: CheckpointStore | None = None
-    target: sqlite3.Connection | None = None
+    target: OutputTarget | None = None
     mapping: PseudoMap | None = None
     try:
         if not dry_run:
             paths.ensure_runtime_dirs()
             store = CheckpointStore(paths.checkpoint_db)
-            output = _prepare_target(
-                inventory, policy, paths, store, run_id, resume_run_id, output_path
+            target, output = _prepare_target(
+                inventory, policy, paths, store, run_id, resume_run_id,
+                output_path, target_format,
             )
             if _requires_secret(rule):
                 if secrets_store is None:
                     raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
                 mapping = PseudoMap(paths.pseudomap_db, create=True)
-            target = sqlite3.connect(output)
-            target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
                 secrets=secrets_store, pseudomap=mapping, write_mapping=True
             )
@@ -190,6 +196,9 @@ def execute_run(
         batch_counter = [0]
         for table in inventory.tables:
             checkpoint = store.get_checkpoint(run_id, table.name) if store else None
+            if target is not None:
+                assert store is not None
+                checkpoint = target.prepare_table(table, checkpoint, store, run_id)
             _after, _rows, table_counts = _process_table(
                 inventory, table, rule.tables.get(table.name), checkpoint, target,
                 store, context, mapping, run_id, batch_size, batch_counter,
@@ -198,9 +207,7 @@ def execute_run(
             if dry_run:
                 merge_counts(dry_counts, table_counts)
         if target is not None:
-            target.commit()
             target.close()
-            target = None
         if dry_run:
             for table_policy in rule.tables.values():
                 for detail in table_policy.columns.values():
@@ -216,11 +223,11 @@ def execute_run(
                 elapsed_seconds=time.monotonic() - started,
                 transform_counts=dry_counts, transformer_map=transformer_map,
                 table_rows={table.name: table.row_count for table in inventory.tables},
-                policy_changed=False, dry_run=True,
+                policy_changed=False, dry_run=True, target_kind=target_format,
             )
-        assert store is not None and output is not None
+        assert store is not None and output is not None and target is not None
         store.set_status(run_id, "completed")
-        output_hash = sqlite_content_digest(output)
+        output_hash = target.digest()
         final_counts: dict[str, dict[str, int]] = {}
         table_rows: dict[str, int] = {}
         for checkpoint in store.list_checkpoints(run_id):
@@ -229,7 +236,7 @@ def execute_run(
         row_count = sum(table_rows.values())
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
-            row_count, transformer_map, final_counts,
+            row_count, transformer_map, final_counts, target_kind=target.kind,
         )
         return RunResult(
             run_id=run_id, dataset_path=inventory.path,
@@ -239,6 +246,7 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            target_kind=target.kind,
         )
     except PipelineInterrupted:
         if store is not None:

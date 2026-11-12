@@ -38,13 +38,20 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--policy", default=None, help="override the example policy path")
     demo.add_argument("--sample-limit", type=int, default=200)
     demo.add_argument("--batch-size", type=int, default=500)
+    demo.add_argument(
+        "--target-format", choices=("sqlite", "csv"), default="sqlite",
+        help="output target format (default: sqlite)",
+    )
     scan = sub.add_parser("scan", parents=[common], help="register datasets and detect columns")
     scan.add_argument("target", nargs="?", default="data/raw", help="file or directory")
     scan.add_argument("--sample-limit", type=int, default=200)
     run = sub.add_parser("run", parents=[common], help="mask a dataset with a policy")
     run.add_argument("--dataset", required=True)
     run.add_argument("--policy", required=True)
-    run.add_argument("--output", default=None)
+    run.add_argument("--output", default=None,
+                     help="target file (sqlite) or directory (csv)")
+    run.add_argument("--target-format", choices=("sqlite", "csv"), default="sqlite",
+                     help="output target format (default: sqlite)")
     run.add_argument("--batch-size", type=int, default=1000)
     run.add_argument("--sample-limit", type=int, default=200)
     run.add_argument("--dry-run", action="store_true", help="count only; write nothing")
@@ -88,6 +95,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         policy_path=args.policy,
         sample_limit=args.sample_limit,
         batch_size=args.batch_size,
+        target_format=args.target_format,
     )
     return 0
 
@@ -121,6 +129,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         dry_run=args.dry_run,
         output_path=args.output,
+        target_format=args.target_format,
     )
     print(
         f"run={result.run_id} rows={result.row_count} elapsed={result.elapsed_seconds:.3f}s"

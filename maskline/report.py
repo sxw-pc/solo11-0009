@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import Paths
-from .dataset_io import iter_csv_tuples, iter_table_rows
+from .dataset_io import iter_csv_tuples, iter_table_rows, sanitize_table_name
 from .policies import DatasetRule, Policy
 from .registry import DatasetInventory, TableInfo
 from .utils import atomic_write_text, quote_ident, sqlite_connect_readonly
@@ -39,6 +40,21 @@ def _source_rows(inventory: DatasetInventory, table: TableInfo, limit: int) -> l
 
 
 def _target_rows(output: Path, table: str, limit: int) -> dict[int, tuple[Any, ...]]:
+    if output.is_dir():
+        # CSV target: one <table>.csv per source table; data row i holds the
+        # i-th source row in rowid order (rowids themselves are not stored).
+        path = output / f"{sanitize_table_name(table)}.csv"
+        if not path.exists():
+            return {}
+        rows: dict[int, tuple[Any, ...]] = {}
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.reader(fh)
+            next(reader, None)  # header
+            for index, row in enumerate(reader, start=1):
+                if index > limit:
+                    break
+                rows[index] = tuple(row)
+        return rows
     conn = sqlite_connect_readonly(output)
     try:
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({quote_ident(table)})")]
@@ -79,9 +95,14 @@ def _samples_for_table(
             if column.name not in configured:
                 warnings.add(column.name)
     target_rows = _target_rows(output, table.name, 5)
+    csv_target = Path(output).is_dir()
     samples = []
-    for rowid, values in _source_rows(inventory, table, 5):
-        after = target_rows.get(rowid, ())
+    for position, (rowid, values) in enumerate(
+        _source_rows(inventory, table, 5), start=1
+    ):
+        # CSV targets store no rowids; match source and target rows by their
+        # position in rowid order instead.
+        after = target_rows.get(position if csv_target else rowid, ())
         before_values: dict[str, Any] = {}
         after_values: dict[str, Any] = {}
         for index, column in enumerate(table.columns):

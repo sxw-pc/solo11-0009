@@ -47,6 +47,7 @@ def run_demo(
     policy_path: str | Path | None = None,
     sample_limit: int = 200,
     batch_size: int = 500,
+    target_format: str = "sqlite",
 ) -> DemoResult:
     paths = Paths.for_workspace(workspace)
     paths.ensure_runtime_dirs()
@@ -79,6 +80,7 @@ def run_demo(
             paths,
             secrets_store=secret_store,
             batch_size=batch_size,
+            target_format=target_format,
         )
         artifacts = finalize_run(
             paths, summary.inventory, policy, run_result, summary.findings

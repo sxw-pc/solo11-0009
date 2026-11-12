@@ -73,6 +73,10 @@ def finalize_run(
     findings: list[dict[str, Any]],
 ) -> dict[str, Any]:
     report_paths = generate_report(paths, inventory, policy, result, findings)
-    entry = build_audit_entry(result, result.transformer_map)
+    entry = build_audit_entry(
+        result,
+        result.transformer_map,
+        extra={"target_kind": getattr(result, "target_kind", "sqlite")},
+    )
     audit_entry = AuditLog(paths.audit_path).append(entry)
     return {"report": report_paths, "audit": audit_entry}

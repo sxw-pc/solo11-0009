@@ -39,6 +39,7 @@ def write_manifest(
     row_count: int,
     transformer_map: dict[str, dict[str, str]],
     transform_counts: dict[str, dict[str, int]],
+    target_kind: str = "sqlite",
 ) -> tuple[Path, bool]:
     previous = previous_manifest(manifest_dir, inventory.fingerprint)
     changed = bool(
@@ -55,6 +56,7 @@ def write_manifest(
         "previous_policy_fingerprint": (previous or {}).get("policy_fingerprint"),
         "output": str(output_path),
         "output_hash": output_hash,
+        "target_kind": target_kind,
         "row_count": row_count,
         "transformers": transformer_map,
         "transform_counts": transform_counts,
