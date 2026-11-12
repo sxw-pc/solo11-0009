@@ -54,6 +54,19 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--sample-limit", type=int, default=200)
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
     reveal.add_argument("--token", required=True)
+    aggregate = sub.add_parser(
+        "aggregate", parents=[common],
+        help="build a cross-run summary report for one dataset (path or fingerprint)",
+    )
+    aggregate.add_argument("target", help="dataset path or 64-character content fingerprint")
+    aggregate.add_argument(
+        "--detail-limit", type=int, default=50,
+        help="fold per-run details into the appendix above this many runs (default: 50)",
+    )
+    aggregate.add_argument(
+        "--include-anomalies", action="store_true",
+        help="also aggregate runs that fail status/audit/output checks (default: no)",
+    )
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
@@ -189,7 +202,6 @@ def _cmd_reveal(args: argparse.Namespace) -> int:
 
 
 def _cmd_audit(args: argparse.Namespace) -> int:
-    paths = _paths(args)
     if args.verify:
         verification = AuditLog(paths.audit_path).verify()
         print(

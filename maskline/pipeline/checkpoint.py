@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..utils import sqlite_connect_readonly
+
 
 @dataclass(frozen=True)
 class RunRecord:
@@ -143,6 +145,68 @@ class CheckpointStore:
             "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [RunRecord.from_row(row) for row in rows]
+
+
+def read_run_records(
+    path: str | Path, dataset_fingerprint: str | None = None
+) -> list[dict[str, object]]:
+    """Read the runs catalog without opening it for writing.
+
+    Aggregation is allowed to consume run history but must not acquire any
+    additional write capability over the checkpoint database.
+    """
+    db_path = Path(path)
+    if not db_path.is_file():
+        return []
+    try:
+        conn = sqlite_connect_readonly(db_path)
+    except sqlite3.Error:
+        return []
+    try:
+        if dataset_fingerprint is None:
+            rows = conn.execute(
+                "SELECT * FROM runs ORDER BY started_at, run_id"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM runs WHERE dataset_fingerprint = ? "
+                "ORDER BY started_at, run_id",
+                (dataset_fingerprint,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+
+def read_checkpoint_records(path: str | Path, run_id: str) -> list[dict[str, object]]:
+    """Read one run's batch checkpoints read-only; counts are decoded in memory."""
+    db_path = Path(path)
+    if not db_path.is_file():
+        return []
+    try:
+        conn = sqlite_connect_readonly(db_path)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM checkpoints WHERE run_id = ? ORDER BY table_name",
+            (run_id,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["counts"] = json.loads(item.pop("counts_json") or "{}")
+            except json.JSONDecodeError:
+                item["counts"] = {}
+            result.append(item)
+        return result
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
 
 
 def _checkpoint_from_row(row: sqlite3.Row) -> TableCheckpoint:

@@ -281,5 +281,56 @@ class Catalog:
         return result
 
 
+def read_dataset_record(db_path: str | Path, fingerprint: str) -> dict[str, Any] | None:
+    """Read one dataset record without ever opening the catalog for writing."""
+    path = Path(db_path)
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite_connect_readonly(path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT * FROM datasets WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["tables"] = json.loads(item.pop("tables_json"))
+        return item
+    except (sqlite3.Error, json.JSONDecodeError):
+        return None
+    finally:
+        conn.close()
+
+
+def read_findings_snapshot(db_path: str | Path, fingerprint: str) -> list[dict[str, Any]]:
+    """Read the registry's most recent findings for a fingerprint, read-only."""
+    path = Path(db_path)
+    if not path.is_file():
+        return []
+    try:
+        conn = sqlite_connect_readonly(path)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM findings WHERE dataset_fingerprint = ? "
+            "ORDER BY table_name, column_name",
+            (fingerprint,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["candidates"] = json.loads(item.pop("candidates_json") or "[]")
+            result.append(item)
+        return result
+    except (sqlite3.Error, json.JSONDecodeError):
+        return []
+    finally:
+        conn.close()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
