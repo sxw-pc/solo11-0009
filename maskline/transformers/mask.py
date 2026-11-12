@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .base import ParamSpec, TransformContext
+from .base import ParamSpec, TransformContext, register_transformer
 
 
+@register_transformer
 class MaskTransformer:
     name = "mask"
+    label = "遮蔽"
+    version = 1
     param_specs = (
         ParamSpec("keep_prefix", "int", default=0, minimum=0),
         ParamSpec("keep_suffix", "int", default=0, minimum=0),

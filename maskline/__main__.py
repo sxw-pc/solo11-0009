@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,20 @@ from .pipeline.checkpoint import CheckpointStore
 from .pipeline.runner import PipelineError, execute_run
 from .pseudomap import PseudoMap, PseudoMapError
 from .registry import inspect_dataset
+from .transformers import TransformError, load_plugins
 from .utils import MasklineError
 from .workflow import finalize_run, needs_secret, scan_paths
+
+
+def _load_requested_plugins(args: argparse.Namespace) -> None:
+    """Load custom transformer plugins before any policy is parsed."""
+    paths: list[str] = []
+    env_paths = os.environ.get("MASKLINE_PLUGIN_PATH", "")
+    if env_paths.strip():
+        paths.extend(item for item in env_paths.split(os.pathsep) if item)
+    paths.extend(getattr(args, "plugin", None) or [])
+    if paths:
+        load_plugins(paths)
 
 
 def _common() -> argparse.ArgumentParser:
@@ -45,11 +58,21 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--dataset", required=True)
     run.add_argument("--policy", required=True)
     run.add_argument("--output", default=None)
+    run.add_argument(
+        "--plugin", action="append", default=[],
+        help="custom transformer .py file or directory (repeatable; "
+             "or set MASKLINE_PLUGIN_PATH)",
+    )
     run.add_argument("--batch-size", type=int, default=1000)
     run.add_argument("--sample-limit", type=int, default=200)
     run.add_argument("--dry-run", action="store_true", help="count only; write nothing")
     resume = sub.add_parser("resume", parents=[common], help="resume an interrupted run")
     resume.add_argument("--run-id", required=True)
+    resume.add_argument(
+        "--plugin", action="append", default=[],
+        help="custom transformer .py file or directory (repeatable; "
+             "or set MASKLINE_PLUGIN_PATH)",
+    )
     resume.add_argument("--batch-size", type=int, default=1000)
     resume.add_argument("--sample-limit", type=int, default=200)
     reveal = sub.add_parser("reveal", parents=[common], help="reveal a pseudonym token")
@@ -100,6 +123,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    _load_requested_plugins(args)
     paths = _paths(args)
     dataset = Path(args.dataset).expanduser().resolve()
     policy = load_policy(args.policy)
@@ -144,6 +168,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_resume(args: argparse.Namespace) -> int:
+    _load_requested_plugins(args)
     paths = _paths(args)
     store = CheckpointStore(paths.checkpoint_db)
     try:
@@ -223,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return handlers[args.command](args)
-    except (MasklineError, PolicyError, PipelineError, PseudoMapError, FileNotFoundError) as exc:
+    except (MasklineError, PolicyError, PipelineError, PseudoMapError, TransformError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

@@ -39,6 +39,7 @@ def write_manifest(
     row_count: int,
     transformer_map: dict[str, dict[str, str]],
     transform_counts: dict[str, dict[str, int]],
+    transformer_identities: dict[str, str] | None = None,
 ) -> tuple[Path, bool]:
     previous = previous_manifest(manifest_dir, inventory.fingerprint)
     changed = bool(
@@ -57,6 +58,9 @@ def write_manifest(
         "output_hash": output_hash,
         "row_count": row_count,
         "transformers": transformer_map,
+        # Implementation ids pin the exact transformer code/schema behind each
+        # name; resume refuses to continue when these no longer match.
+        "transformer_identities": transformer_identities or {},
         "transform_counts": transform_counts,
         "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }

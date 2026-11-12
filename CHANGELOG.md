@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- 变换器统一注册机制：每个变换器声明名称、参数 schema 与实现并自注册；`policies` 在加载阶段依据注册表校验类型与参数，未注册类型在任何数据写出之前失败，目标库无残留表。
+- 插件扩展：新增自定义变换器只需新增一个文件并注册一次（`@register_transformer`），通过 `--plugin` 或 `MASKLINE_PLUGIN_PATH` 加载；同名注册报错而不是覆盖。示例 `examples/date_jitter_plugin.py`。
+- 续跑保护：每次运行记录所用变换器的实现标识（源文件 + schema + 版本）到断点库与清单；续跑时若某变换器已不存在或实现已变更则拒绝续跑并说明原因，旧断点 fail closed。
+- 去除运行器/工作流/报告中对变换器名字与标签的硬编码，改由注册表元数据（`label`、`requires_secret`、`requires_pseudomap`）驱动。
+- 六个内置变换器的脱敏结果与重构前逐字节一致（同输入、同密钥下输出库内容哈希相同）。
+
 ## v0.1.0
 
 首个可用版本，全部功能离线运行。

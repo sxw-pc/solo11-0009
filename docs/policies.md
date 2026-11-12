@@ -55,6 +55,44 @@ phone:
 
 不允许未知键。`transformer`、参数名、参数类型、枚举值、最小值都会在加载策略时校验。例如 `generalize` 缺少必填的 `mode`、未知转换器、未知列都会立即报错。加载时会填入参数默认值，因此策略指纹也包含默认值。
 
+所有校验都经由统一的**转换器注册表**完成：策略加载阶段（任何数据写出之前）就会确认每个 `transformer` 名称已注册、参数符合该转换器声明的 schema。引用未注册类型的策略在 `load_policy` 阶段即失败，运行命令不会创建目标库或运行目录，因此不会留下残留表。
+
+## 自定义转换器（插件）
+
+新增一个自定义转换器不需要改动 maskline 包本身，只需**新增一个文件并注册一次**。最小示例（见仓库 `examples/date_jitter_plugin.py`）：
+
+```python
+from typing import Any, Mapping
+from maskline.transformers import ParamSpec, TransformContext, register_transformer
+
+@register_transformer
+class DateJitterTransformer:
+    name = "date_jitter"          # 策略 YAML 中引用的名字
+    label = "日期扰动"             # 报告中显示的名称（可选）
+    version = 1                   # 实现版本，改动实现时应递增
+    param_specs = (               # 参数 schema，加载策略时据此校验
+        ParamSpec("max_days", "int", default=7, minimum=1),
+    )
+
+    def transform(self, value: Any, params: Mapping[str, Any],
+                  context: TransformContext) -> Any:
+        ...  # 必须确定性：同输入、同参数、同密钥得到同输出
+```
+
+加载方式（二选一，可重复/组合）：
+
+- CLI：`maskline run --plugin path/to/plugin.py ...`（`--plugin` 可重复，也可传目录，目录下的 `*.py` 都会被加载）；
+- 环境变量：`MASKLINE_PLUGIN_PATH=/path/to/plugins`（多个路径用系统路径分隔符分隔）。
+
+插件加载发生在策略解析之前，因此插件提供的转换器与内置转换器走完全相同的校验、分发、计数与断点续跑路径。在代码中也可以直接调用 `maskline.transformers.load_plugins([...])` 或 `register_transformer(...)`。
+
+约定与约束：
+
+- 转换器需声明 `name`（非空字符串）、`param_specs`（参数 schema 元组）和 `transform(value, params, context)` 方法；可选声明 `label`、`version`、`requires_secret`、`requires_pseudomap`。
+- `requires_secret = True` 的转换器会让运行自动要求 `MASKLINE_SECRET_FILE`；`requires_pseudomap = True` 还会自动准备假名映射库。无需在运行器里登记名字。
+- **同名注册会报错而不是覆盖**。两个模块注册同一个 `name` 时，第二个注册直接抛出 `TransformError`，避免静默替换实现。
+- 转换器必须确定性，并对 `NULL`/空串有明确处理。
+
 ## 策略指纹与清单
 
 策略内容会被规范化（键排序、参数补默认值）并计算 SHA-256 指纹。每次运行写入 `data/manifests/<数据集指纹前缀>.json`，包含策略指纹、输出哈希、各列转换器和各转换器计数。若同一数据集再次运行时策略指纹与上次清单不同，清单会标记：
@@ -64,6 +102,21 @@ phone:
 ```
 
 策略指纹变化后不能用旧 run 的断点续跑；请重新执行。只需要确认影响面时先用 `--dry-run`。
+
+### 转换器实现标识与续跑保护
+
+每个已注册转换器都有一个稳定的**实现标识**（implementation id），由转换器名称、声明版本、参数 schema 和定义它的源文件内容共同计算。每次运行会把该 run 用到的全部转换器的标识同时写入：
+
+- 断点库 `data/checkpoints.sqlite` 的 `runs.transformer_identities_json`；
+- 清单 `data/manifests/<数据集指纹前缀>.json` 的 `transformer_identities` 字段。
+
+断点续跑时会先把记录的标识与当前注册表逐一比对：
+
+- 某个转换器**已不存在**（插件未加载或被移除）：拒绝续跑并列出缺失的名字；
+- 某个转换器**实现已变更**（源文件或 schema 变化导致标识不同）：拒绝续跑并说明是哪个转换器；
+- 早于标识机制产生的旧断点：无法证明兼容性，同样拒绝续跑（fail closed）。
+
+拒绝发生在打开/扩展目标库之前，不会向已有输出追加任何由不同实现产生的行。需要更换实现时，请显式调整后重新发起一个全新 run，而不是续跑旧 run。
 
 ## 转换器参考
 

@@ -101,8 +101,8 @@ maskline/
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
-│   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
-│   ├── pipeline/            # 流式执行、断点、清单
+│   ├── transformers/        # 统一注册表 + 六个内置转换器（各自声明名称/参数 schema/实现并自注册）
+│   ├── pipeline/            # 流式执行、断点、清单（含转换器实现标识与续跑保护）
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
@@ -110,6 +110,8 @@ maskline/
 │   ├── fixturegen.py        # 固定种子合成数据
 │   └── demo.py              # 一键演示编排
 ├── policies/example.yaml
+├── examples/
+│   └── date_jitter_plugin.py # 自定义转换器示例：一个文件 + 一次注册
 ├── scripts/make_fixture.py
 ├── docs/policies.md
 ├── docs/threat-model.md
@@ -157,6 +159,10 @@ datasets:
 ```
 
 路径按数据集文件名或完整路径匹配；完整参数与边界见 [docs/policies.md](docs/policies.md)。
+
+### 自定义转换器
+
+新增一个转换器只需新增一个文件并注册一次，无需修改 maskline 包。在模块里用 `@register_transformer` 声明名称、参数 schema（`param_specs`）和实现，然后通过 `--plugin 文件或目录`（可重复）或 `MASKLINE_PLUGIN_PATH` 加载，策略即可像内置类型一样引用它。同名注册会报错而不是覆盖；未注册类型在策略加载阶段就失败，目标库不会产生任何残留。完整示例见 `examples/date_jitter_plugin.py`。
 
 ## 常用命令
 

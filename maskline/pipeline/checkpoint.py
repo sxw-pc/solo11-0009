@@ -20,9 +20,20 @@ class RunRecord:
     status: str
     started_at: str
     updated_at: str
+    transformer_identities: dict[str, str] = field(default_factory=dict)
+
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "RunRecord":
-        return cls(**{key: row[key] for key in row.keys()})
+        data = {key: row[key] for key in row.keys()}
+        raw_identities = data.pop("transformer_identities_json", None)
+        record = cls(**data)
+        if raw_identities:
+            object.__setattr__(
+                record,
+                "transformer_identities",
+                json.loads(raw_identities),
+            )
+        return record
 
 
 @dataclass(frozen=True)
@@ -66,7 +77,17 @@ class CheckpointStore:
             );
             """
         )
+        self._migrate_runs_table()
         self.conn.commit()
+
+    def _migrate_runs_table(self) -> None:
+        """Add transformer_identities_json to checkpoint DBs created earlier."""
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        if "transformer_identities_json" not in columns:
+            self.conn.execute(
+                "ALTER TABLE runs ADD COLUMN transformer_identities_json TEXT "
+                "NOT NULL DEFAULT '{}'"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -79,11 +100,16 @@ class CheckpointStore:
 
     def create_run(self, record: RunRecord) -> None:
         self.conn.execute(
-            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs "
+            "(run_id, dataset_path, dataset_fingerprint, policy_path, "
+            "policy_fingerprint, output_path, status, started_at, updated_at, "
+            "transformer_identities_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.run_id, record.dataset_path, record.dataset_fingerprint,
                 record.policy_path, record.policy_fingerprint, record.output_path,
                 record.status, record.started_at, record.updated_at,
+                json.dumps(record.transformer_identities, sort_keys=True),
             ),
         )
         self.conn.commit()

@@ -7,7 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
-from .base import ParamSpec, TransformContext, TransformError
+from .base import ParamSpec, TransformContext, TransformError, register_transformer
 
 DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m")
 PROVINCE_RE = re.compile(r"^.{2,10}?(?:省|自治区|特别行政区)")
@@ -33,8 +33,11 @@ def _decimal_text(value: Decimal) -> str:
     return "0" if text in {"-0", ""} else text
 
 
+@register_transformer
 class GeneralizeTransformer:
     name = "generalize"
+    label = "泛化"
+    version = 1
     param_specs = (
         ParamSpec("mode", "str", required=True, choices=("date", "age", "amount", "address")),
         ParamSpec("level", "str", default="month", choices=("month", "quarter", "year")),

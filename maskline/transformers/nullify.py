@@ -5,11 +5,14 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Mapping
 
-from .base import ParamSpec, TransformContext
+from .base import ParamSpec, TransformContext, register_transformer
 
 
+@register_transformer
 class NullifyTransformer:
     name = "nullify"
+    label = "置空"
+    version = 1
     param_specs = ()
 
     def transform(
@@ -18,8 +21,11 @@ class NullifyTransformer:
         return None
 
 
+@register_transformer
 class RoundTransformer:
     name = "round"
+    label = "取整"
+    version = 1
     param_specs = (ParamSpec("decimals", "int", default=0, minimum=0),)
 
     def transform(

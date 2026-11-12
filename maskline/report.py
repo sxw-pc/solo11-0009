@@ -11,19 +11,21 @@ from .config import Paths
 from .dataset_io import iter_csv_tuples, iter_table_rows
 from .policies import DatasetRule, Policy
 from .registry import DatasetInventory, TableInfo
+from .transformers import REGISTRY
 from .utils import atomic_write_text, quote_ident, sqlite_connect_readonly
 
 REDACTED = "[源值已隐藏]"
 UNMASKED = "[未脱敏，已隐藏]"
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低", "none": "无"}
-TRANSFORMER_LABELS = {
-    "mask": "遮蔽",
-    "hash": "HMAC 哈希",
-    "generalize": "泛化",
-    "pseudonym": "假名化",
-    "nullify": "置空",
-    "round": "取整",
-}
+
+
+def _transformer_label(name: str) -> str:
+    # Labels live on the registered transformer; unknown names fall back to
+    # the raw identifier rather than to a hardcoded table.
+    try:
+        return REGISTRY.label(name)
+    except Exception:
+        return name
 
 
 def _source_rows(inventory: DatasetInventory, table: TableInfo, limit: int) -> list[tuple[int, tuple[Any, ...]]]:
@@ -166,7 +168,7 @@ def _markdown(
         params = json.dumps(detail.params, ensure_ascii=False, sort_keys=True)
         lines.append(
             f"| {_cell(table)} | {_cell(column)} | "
-            f"{TRANSFORMER_LABELS.get(detail.transformer, detail.transformer)} "
+            f"{_transformer_label(detail.transformer)} "
             f"(`{detail.transformer}`) | `{_cell(params)}` |"
         )
     lines.extend(
@@ -180,7 +182,7 @@ def _markdown(
     )
     for name, counts in sorted(result.transform_counts.items()):
         lines.append(
-            f"| {TRANSFORMER_LABELS.get(name, name)} (`{name}`) | "
+            f"| {_transformer_label(name)} (`{name}`) | "
             f"{counts.get('seen', 0)} | {counts.get('processed', 0)} | "
             f"{counts.get('changed', 0)} |"
         )

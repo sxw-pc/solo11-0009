@@ -14,7 +14,7 @@ from ..config import Paths, SecretStore
 from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
 from ..registry import DatasetInventory, TableInfo
-from ..transformers import TransformContext
+from ..transformers import REGISTRY, TransformContext
 from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
@@ -54,12 +54,75 @@ def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
     }
 
 
-def _requires_secret(rule: DatasetRule) -> bool:
-    return any(
-        detail.transformer in {"pseudonym", "hash"}
+def _transformer_names(rule: DatasetRule) -> set[str]:
+    return {
+        detail.transformer
         for table_policy in rule.tables.values()
         for detail in table_policy.columns.values()
+    }
+
+
+def _transformer_identities(rule: DatasetRule) -> dict[str, str]:
+    """Name -> implementation id for every transformer referenced by a rule.
+
+    Raises PipelineError for an unregistered transformer so that a run (and
+    any resume) fails before the target database is created or extended.
+    """
+    identities: dict[str, str] = {}
+    for name in sorted(_transformer_names(rule)):
+        if not REGISTRY.has(name):
+            raise PipelineError(
+                f"unknown transformer {name!r}; registered transformers: "
+                + ", ".join(REGISTRY.names())
+            )
+        identities[name] = REGISTRY.implementation_id(name)
+    return identities
+
+
+def verify_resume_identities(record: RunRecord) -> None:
+    """Refuse to resume when a recorded transformer vanished or changed.
+
+    The checkpoint stores the implementation ids captured when the run
+    started. A missing transformer or a different id means continuing would
+    write rows produced by a different implementation into the same target,
+    so the run is rejected with an explicit reason instead of silently
+    swapping implementations.
+    """
+    recorded = record.transformer_identities
+    if not recorded:
+        # Checkpoints written before the identity registry existed cannot be
+        # proven compatible; fail closed rather than assume nothing changed.
+        raise PipelineError(
+            f"run {record.run_id!r} predates transformer identity tracking; "
+            "start a fresh run instead of resuming"
+        )
+    missing = sorted(name for name in recorded if not REGISTRY.has(name))
+    if missing:
+        raise PipelineError(
+            "refusing to resume run "
+            f"{record.run_id!r}: transformer(s) no longer registered: "
+            + ", ".join(missing)
+        )
+    changed = sorted(
+        name
+        for name, expected in recorded.items()
+        if REGISTRY.implementation_id(name) != expected
     )
+    if changed:
+        raise PipelineError(
+            "refusing to resume run "
+            f"{record.run_id!r}: transformer implementation changed since the "
+            "interrupted run: " + ", ".join(changed)
+            + " (bump the policy/transformer deliberately and start a fresh run)"
+        )
+
+
+def _requires_secret(rule: DatasetRule) -> bool:
+    return any(REGISTRY.requires_secret(name) for name in _transformer_names(rule))
+
+
+def _requires_pseudomap(rule: DatasetRule) -> bool:
+    return any(REGISTRY.requires_pseudomap(name) for name in _transformer_names(rule))
 
 
 def _prepare_target(
@@ -70,6 +133,7 @@ def _prepare_target(
     run_id: str,
     resume_run_id: str | None,
     output_path: str | Path | None,
+    identities: dict[str, str],
 ) -> Path:
     if resume_run_id:
         record = store.get_run(run_id)
@@ -81,6 +145,9 @@ def _prepare_target(
             raise PipelineError("dataset content changed since the interrupted run")
         if record.policy_fingerprint != policy.fingerprint:
             raise PipelineError("policy changed since the interrupted run")
+        # Fail before touching the target if a transformer is missing or its
+        # implementation no longer matches the one that wrote earlier batches.
+        verify_resume_identities(record)
         output = Path(record.output_path)
         if not output.exists():
             raise PipelineError(f"target database is missing: {output}")
@@ -98,6 +165,7 @@ def _prepare_target(
         RunRecord(
             run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
             policy.fingerprint, str(output), "running", now, now,
+            transformer_identities=identities,
         )
     )
     return output
@@ -157,6 +225,10 @@ def execute_run(
     if batch_size < 1:
         raise PipelineError("batch_size must be positive")
     rule = policy.validate_against(inventory)
+    # Planning-phase gate: every referenced transformer must exist with a
+    # stable implementation id before any runtime directory or target file
+    # is created, so an invalid policy can never leave residue behind.
+    identities = _transformer_identities(rule)
     if dry_run and resume_run_id:
         raise PipelineError("dry-run cannot be combined with resume")
     started = time.monotonic()
@@ -169,11 +241,13 @@ def execute_run(
             paths.ensure_runtime_dirs()
             store = CheckpointStore(paths.checkpoint_db)
             output = _prepare_target(
-                inventory, policy, paths, store, run_id, resume_run_id, output_path
+                inventory, policy, paths, store, run_id, resume_run_id,
+                output_path, identities,
             )
             if _requires_secret(rule):
                 if secrets_store is None:
                     raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
+            if _requires_pseudomap(rule):
                 mapping = PseudoMap(paths.pseudomap_db, create=True)
             target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
@@ -229,7 +303,7 @@ def execute_run(
         row_count = sum(table_rows.values())
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
-            row_count, transformer_map, final_counts,
+            row_count, transformer_map, final_counts, identities,
         )
         return RunResult(
             run_id=run_id, dataset_path=inventory.path,

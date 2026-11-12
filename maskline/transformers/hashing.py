@@ -6,11 +6,15 @@ import hashlib
 import hmac
 from typing import Any, Mapping
 
-from .base import ParamSpec, TransformContext, TransformError
+from .base import ParamSpec, TransformContext, TransformError, register_transformer
 
 
+@register_transformer
 class HashingTransformer:
     name = "hash"
+    label = "HMAC 哈希"
+    version = 1
+    requires_secret = True
     param_specs = (ParamSpec("salt_ref", "str", default="hmac_salt"),)
 
     def transform(

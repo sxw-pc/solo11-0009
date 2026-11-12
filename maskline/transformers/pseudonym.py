@@ -6,7 +6,7 @@ import hashlib
 import hmac
 from typing import Any, Mapping
 
-from .base import TransformContext, TransformError
+from .base import TransformContext, TransformError, register_transformer
 
 
 def pseudonym_token(value: str, key: str) -> str:
@@ -14,8 +14,13 @@ def pseudonym_token(value: str, key: str) -> str:
     return "psn_" + digest[:40]
 
 
+@register_transformer
 class PseudonymTransformer:
     name = "pseudonym"
+    label = "假名化"
+    version = 1
+    requires_secret = True
+    requires_pseudomap = True
     param_specs = ()
 
     def transform(
