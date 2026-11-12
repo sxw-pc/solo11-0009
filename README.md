@@ -19,6 +19,7 @@
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
 - Markdown / JSON 脱敏报告生成器
+- 跨轮次汇总报告：同一数据集多轮运行的趋势、策略差异、敏感发现漂移与审计锚点状态
 
 **不是：**
 
@@ -106,6 +107,7 @@ maskline/
 │   ├── pseudomap.py         # 可逆假名映射
 │   ├── audit.py             # 追加式 JSONL 审计链
 │   ├── report.py            # Markdown / JSON 报告
+│   ├── summary.py           # 跨轮次汇总报告（趋势/策略差异/发现漂移）
 │   ├── workflow.py          # 扫描、收尾、审计的共享流程
 │   ├── fixturegen.py        # 固定种子合成数据
 │   └── demo.py              # 一键演示编排
@@ -180,6 +182,10 @@ python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
 python -m maskline audit --verify
+
+# 汇总同一数据集的全部历史运行（趋势、策略差异、发现漂移、审计锚点）
+python -m maskline summary --dataset data/raw/demo.sqlite
+python -m maskline summary --fingerprint <数据集指纹>
 ```
 
 运行默认使用当前目录作为工作区，可用 `--workspace <dir>` 或 `MASKLINE_HOME` 指定。

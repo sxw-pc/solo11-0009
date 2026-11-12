@@ -57,6 +57,21 @@ def _parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", parents=[common], help="inspect or verify the audit log")
     audit.add_argument("--verify", action="store_true", help="verify the whole hash chain")
     audit.add_argument("--tail", type=int, default=10)
+    summary = sub.add_parser(
+        "summary", parents=[common],
+        help="aggregate all runs of one dataset into a summary report",
+    )
+    target = summary.add_mutually_exclusive_group(required=True)
+    target.add_argument("--dataset", default=None, help="source dataset path")
+    target.add_argument("--fingerprint", default=None, help="dataset fingerprint")
+    summary.add_argument(
+        "--include-invalid", action="store_true",
+        help="also fold runs that failed status validation into the trends",
+    )
+    summary.add_argument(
+        "--collapse-threshold", type=int, default=50,
+        help="move per-run details to the appendix beyond this many runs (default: 50)",
+    )
     return parser
 
 
@@ -210,6 +225,36 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_summary(args: argparse.Namespace) -> int:
+    from .summary import generate_summary
+    paths = _paths(args)
+    result = generate_summary(
+        paths,
+        fingerprint=args.fingerprint,
+        dataset_path=args.dataset,
+        include_invalid=args.include_invalid,
+        collapse_threshold=args.collapse_threshold,
+    )
+    overview = result["payload"]["summary"]
+    print(
+        f"dataset={overview['dataset']} runs={overview['runs_total']} "
+        f"included={overview['runs_included']} flagged={overview['runs_excluded']}"
+    )
+    print(f"summary={result['markdown']}")
+    print(f"summary_json={result['json']}")
+    if result["audit"] is not None:
+        print(f"audit_seq={result['audit']['seq']}")
+    else:
+        print(
+            f"warning: summary not appended to the audit chain: {result['audit_error']}",
+            file=sys.stderr,
+        )
+    anomalies = result["payload"]["anomalies"]
+    if anomalies:
+        print(f"anomalies={len(anomalies)} (annotated in the report)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -220,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         "resume": _cmd_resume,
         "reveal": _cmd_reveal,
         "audit": _cmd_audit,
+        "summary": _cmd_summary,
     }
     try:
         return handlers[args.command](args)
