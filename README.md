@@ -15,6 +15,7 @@
 **是：**
 
 - 本地数据集的敏感字段发现引擎（正则 + 校验位 + 中文词典启发）
+- 人类裁定层：按数据集/表/列强制敏感或强制非敏感，带必填理由与审计记录
 - 基于 YAML 的声明式脱敏策略执行器
 - 可逆假名化与独立映射表管理
 - 防篡改的追加式审计日志
@@ -101,6 +102,7 @@ maskline/
 │   ├── registry.py          # 数据集指纹、元数据与发现结果入库
 │   ├── detectors/           # 正则、校验位、中文姓名/地址启发、打分
 │   ├── policies.py          # YAML 加载、严格校验、策略指纹
+│   ├── overrides.py         # 人工裁定 YAML 加载、合并与冲突判定
 │   ├── transformers/        # mask/hash/generalize/pseudonym/nullify/round
 │   ├── pipeline/            # 流式执行、断点、清单
 │   ├── pseudomap.py         # 可逆假名映射
@@ -112,6 +114,7 @@ maskline/
 ├── policies/example.yaml
 ├── scripts/make_fixture.py
 ├── docs/policies.md
+├── docs/overrides.md
 ├── docs/threat-model.md
 └── tests/
 ```
@@ -158,11 +161,40 @@ datasets:
 
 路径按数据集文件名或完整路径匹配；完整参数与边界见 [docs/policies.md](docs/policies.md)。
 
+## 人工裁定（overrides）
+
+检测器误报/漏报不必改策略 YAML。在工作区根目录放 `overrides.yaml`，按数据集/表/列声明裁定：
+
+```yaml
+version: 1
+overrides:
+  - dataset: demo.sqlite
+    table: customers
+    column: address            # 检测器报为 address，人工确认只是城市级地址
+    decision: force_not_sensitive
+    reason: 人工确认仅为城市级地址，不含门牌与姓名
+  - dataset: demo.sqlite
+    table: customers
+    column: employee_no        # 检测器漏报，人工确认是内部工号
+    decision: force_sensitive
+    reason: 内部工号，必须按敏感字段处理
+```
+
+- 裁定合并进 scan 的发现结论，报告与 registry 会单独标注裁定与理由；操作者从 `MASKLINE_OPERATOR` 读取（可用 `--operator` 覆盖），每条生效裁定写一条审计事件。
+- 策略里为同一列配置的变换不会因 `force_sensitive` 自动出现，也不会因 `force_not_sensitive` 自动消失。
+- **冲突取舍**：`force_not_sensitive` 只影响发现结论，不影响执行。若该列在策略里仍配置了变换，报告与控制台会告警，但**仍然脱敏**（宁可多脱，不能漏脱；没有反向开关）。
+- **未匹配裁定不会静默消失**：列改名/删除/数据集消失时，scan 控制台与报告会显式列出未匹配条目及原因。
+- **重复条目直接报错**，不做「后者覆盖」；语义有歧义的数据集规则也会报错。
+- 完整规则、字段与示例见 [docs/overrides.md](docs/overrides.md)；可直接使用 [policies/overrides.example.yaml](policies/overrides.example.yaml)。
+
 ## 常用命令
 
 ```bash
 # 扫描目录或单个文件，登记并输出高/中置信度发现
 python -m maskline scan data/raw
+
+# 使用显式 overrides 文件与操作者身份
+python -m maskline scan data/raw --overrides overrides.yaml --operator security/alice
 
 # 执行脱敏，写出独立目标库、报告与审计
 python -m maskline run --dataset data/raw/demo.sqlite \
@@ -190,6 +222,7 @@ python -m maskline audit --verify
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
+- **人工裁定**：裁定不进入策略指纹；它改变发现结论、报告、registry 与审计，不改变执行计划。
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。

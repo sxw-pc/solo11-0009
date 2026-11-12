@@ -16,6 +16,10 @@ from .utils import atomic_write_text, quote_ident, sqlite_connect_readonly
 REDACTED = "[源值已隐藏]"
 UNMASKED = "[未脱敏，已隐藏]"
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低", "none": "无"}
+DECISION_LABELS = {
+    "force_sensitive": "强制敏感",
+    "force_not_sensitive": "强制非敏感",
+}
 TRANSFORMER_LABELS = {
     "mask": "遮蔽",
     "hash": "HMAC 哈希",
@@ -107,6 +111,21 @@ def _cell(value: Any) -> str:
     return text if text != "" else '""'
 
 
+def _finding_label(finding: dict[str, Any]) -> str:
+    override = finding.get("override")
+    if not override:
+        return "—"
+    label = DECISION_LABELS.get(override["decision"], override["decision"])
+    return f"{label}：{override['reason']}"
+
+
+def _detected_label(finding: dict[str, Any]) -> str:
+    if not finding.get("override"):
+        return CONFIDENCE_LABELS.get(finding["confidence"], finding["confidence"])
+    detected = finding.get("detected_confidence") or "none"
+    return CONFIDENCE_LABELS.get(detected, detected)
+
+
 def _markdown(
     inventory: DatasetInventory,
     policy: Policy,
@@ -114,6 +133,7 @@ def _markdown(
     findings: list[dict[str, Any]],
     samples: dict[str, list[dict[str, Any]]],
     warnings: list[dict[str, Any]],
+    adjudications: Any | None = None,
 ) -> str:
     rule = policy.for_dataset(inventory.path)
     applied = {
@@ -134,22 +154,45 @@ def _markdown(
         f"- 处理行数：{result.row_count}",
         f"- 耗时：{result.elapsed_seconds:.3f} 秒",
         f"- 报告生成时间：{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-        "",
-        "## 字段发现",
-        "",
-        "| 表 | 列 | 建议类型 | 置信度 | 得分 | 命中率 | 校验通过率 | 已配置策略 |",
-        "|---|---|---|---|---:|---:|---:|---|",
     ]
+    if adjudications is not None and adjudications.applied:
+        lines.append(
+            f"- 人工裁定：{len(adjudications.applied)} 条已生效，"
+            f"操作者 `{adjudications.operator}`，"
+            f"裁定文件 `{adjudications.override_file}`，"
+            f"指纹 `{adjudications.override_fingerprint}`"
+        )
+    elif adjudications is not None:
+        lines.append("- 人工裁定：无生效条目")
+    lines.extend(
+        [
+            "",
+            "## 字段发现",
+            "",
+            "> 「结论」为检测器结果经人工裁定合并后的最终结论；「检测器」列始终显示原始检测结果。",
+            "",
+            "| 表 | 列 | 结论类型 | 结论置信度 | 检测器类型 | 检测器置信度 | 人工裁定 | 得分 | 命中率 | 校验通过率 | 已配置策略 |",
+            "|---|---|---|---|---|---|---|---:|---:|---:|---|",
+        ]
+    )
     for finding in findings:
         key = (finding["table_name"], finding["column_name"])
         detail = applied.get(key)
-        configured = (
-            f"{detail.transformer}" if detail else "—"
+        configured = f"{detail.transformer}" if detail else "—"
+        effective = CONFIDENCE_LABELS.get(
+            finding["confidence"], finding["confidence"]
         )
-        confidence = CONFIDENCE_LABELS.get(finding["confidence"], finding["confidence"])
+        detected = _detected_label(finding)
+        detected_type = (
+            finding.get("detected_type")
+            if finding.get("override")
+            else finding["sensitive_type"]
+        )
         lines.append(
             f"| {_cell(finding['table_name'])} | {_cell(finding['column_name'])} | "
-            f"{_cell(finding['sensitive_type'] or '—')} | {confidence} | "
+            f"{_cell(finding['sensitive_type'] or '—')} | {effective} | "
+            f"{_cell(detected_type or '—')} | {detected} | "
+            f"{_cell(_finding_label(finding))} | "
             f"{finding['score']:.3f} | {finding['hit_rate']:.1%} | "
             f"{finding['validate_rate']:.1%} | {configured} |"
         )
@@ -223,6 +266,53 @@ def _markdown(
     else:
         lines.append("无。所有高/中置信度敏感字段均已配置策略。")
     lines.append("")
+    lines.extend(["", "## 人工裁定冲突（强制非敏感但策略仍配置变换）", ""])
+    conflicts = adjudications.conflicts if adjudications else []
+    if conflicts:
+        lines.append("| 表 | 列 | 裁定 | 理由 | 策略转换器 | 执行结果 |")
+        lines.append("|---|---|---|---|---|---|")
+        for conflict in conflicts:
+            lines.append(
+                f"| {_cell(conflict.table)} | {_cell(conflict.column)} | "
+                f"{DECISION_LABELS.get(conflict.entry.decision, conflict.entry.decision)} | "
+                f"{_cell(conflict.entry.reason)} | `{conflict.transformer}` | "
+                "仍执行脱敏 |"
+            )
+        lines.append("")
+        lines.append(
+            "> 这些列被人工裁定为非敏感，但策略仍配置了变换。执行层保持脱敏："
+            "宁可多脱，不能漏脱。请同步修改策略或撤销裁定以消除冲突。"
+        )
+    elif adjudications is not None and not adjudications.policy_checked and any(
+        item["decision"] == "force_not_sensitive" for item in adjudications.applied
+    ):
+        lines.append(
+            "> 本次扫描未加载策略，因此无法判断这些强制非敏感列是否仍被策略变换。"
+            "执行前请用 run 复核；策略覆盖时仍会脱敏。"
+        )
+    else:
+        lines.append("无。")
+    lines.append("")
+    lines.extend(["", "## 未匹配的人工裁定", ""])
+    unmatched = adjudications.unmatched if adjudications else []
+    if unmatched:
+        lines.append("| 数据集规则 | 表 | 列 | 裁定 | 理由 | 未匹配原因 |")
+        lines.append("|---|---|---|---|---|---|")
+        for item in unmatched:
+            lines.append(
+                f"| {_cell(item.entry.dataset_pattern)} | {_cell(item.entry.table)} | "
+                f"{_cell(item.entry.column)} | "
+                f"{DECISION_LABELS.get(item.entry.decision, item.entry.decision)} | "
+                f"{_cell(item.entry.reason)} | {_cell(item.reason)} |"
+            )
+        lines.append("")
+        lines.append(
+            "> 以上裁定没有匹配到当前的表或列（常见于列重命名、表删除）。"
+            "它们当前不产生任何效果，请复核后更新或删除对应条目。"
+        )
+    else:
+        lines.append("无。所有人工裁定均匹配到现有列。")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -232,6 +322,7 @@ def generate_report(
     policy: Policy,
     result: Any,
     findings: list[dict[str, Any]],
+    adjudications: Any | None = None,
 ) -> dict[str, Path]:
     if result.output_path is None:
         raise ValueError("dry-run results do not produce reports")
@@ -250,6 +341,27 @@ def generate_report(
         )
         if not configured and finding["confidence"] in {"high", "medium"}:
             warnings.append(finding)
+    adjudication_payload = None
+    if adjudications is not None:
+        adjudication_payload = {
+            "operator": adjudications.operator,
+            "source": adjudications.override_file,
+            "fingerprint": adjudications.override_fingerprint,
+            "applied": adjudications.applied,
+            "conflicts": [
+                {
+                    "dataset": conflict.entry.dataset_pattern,
+                    "table": conflict.table,
+                    "column": conflict.column,
+                    "decision": conflict.entry.decision,
+                    "reason": conflict.entry.reason,
+                    "transformer": conflict.transformer,
+                    "execution": "masked",
+                }
+                for conflict in adjudications.conflicts
+            ],
+            "unmatched": [item.to_dict() for item in adjudications.unmatched],
+        }
     report_core = {
         "run": {
             "run_id": result.run_id,
@@ -268,12 +380,15 @@ def generate_report(
         "findings": findings,
         "samples": samples,
         "warnings": warnings,
+        "adjudications": adjudication_payload,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     paths.reports_dir.mkdir(parents=True, exist_ok=True)
     json_path = paths.reports_dir / f"{result.run_id}.json"
     md_path = paths.reports_dir / f"{result.run_id}.md"
     atomic_write_text(json_path, json.dumps(report_core, ensure_ascii=False, indent=2) + "\n")
-    markdown = _markdown(inventory, policy, result, findings, samples, warnings)
+    markdown = _markdown(
+        inventory, policy, result, findings, samples, warnings, adjudications
+    )
     atomic_write_text(md_path, markdown)
     return {"markdown": md_path, "json": json_path}

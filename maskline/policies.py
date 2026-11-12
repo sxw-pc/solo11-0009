@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +11,7 @@ import yaml
 
 from .registry import DatasetInventory
 from .transformers import REGISTRY, TransformError
-from .utils import MasklineError, canonical_json
+from .utils import MasklineError, canonical_json, path_matches
 
 
 class PolicyError(MasklineError):
@@ -106,20 +105,7 @@ class Policy:
 
 
 def _path_matches(pattern: str, path: Path) -> bool:
-    if not pattern or not pattern.strip():
-        return False
-    normalized = pattern.replace("\\", "/")
-    variants = {
-        path.name,
-        path.as_posix(),
-        str(path),
-    }
-    return any(
-        fnmatch.fnmatchcase(candidate, normalized)
-        or fnmatch.fnmatchcase(candidate.replace("\\", "/"), normalized)
-        or fnmatch.fnmatchcase(candidate, f"*{normalized}")
-        for candidate in variants
-    )
+    return path_matches(pattern, path)
 
 
 def _expect_mapping(value: Any, where: str) -> Mapping[str, Any]:

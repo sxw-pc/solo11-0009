@@ -135,6 +135,44 @@ def verify_audit(path: str | Path) -> AuditVerification:
     return AuditVerification(entries=len(entries), head_hash=previous)
 
 
+def build_adjudication_entry(
+    *,
+    dataset_path: Path,
+    dataset_fingerprint: str,
+    overrides: Any,
+    applied: Any,
+    registry_ids: list[int],
+) -> dict[str, Any]:
+    """One audit event per scan that applied human adjudications.
+
+    Records who adjudicated (operator), when (the append timestamp), what was
+    decided and why, the override file fingerprint, and the registry row ids
+    written for each entry, so the registry and audit log can be cross-checked.
+    """
+    return {
+        "event": "adjudication",
+        "dataset_path": str(dataset_path),
+        "dataset_fingerprint": dataset_fingerprint,
+        "operator": overrides.operator,
+        "override_file": str(overrides.source_path),
+        "override_fingerprint": overrides.fingerprint,
+        "applied": applied.applied,
+        "registry_ids": list(registry_ids),
+        "conflicts": [
+            {
+                "dataset": conflict.entry.dataset_pattern,
+                "table": conflict.table,
+                "column": conflict.column,
+                "decision": conflict.entry.decision,
+                "reason": conflict.entry.reason,
+                "transformer": conflict.transformer,
+            }
+            for conflict in applied.conflicts
+        ],
+        "unmatched": [item.to_dict() for item in applied.unmatched],
+    }
+
+
 def build_audit_entry(
     result: Any,
     rule_columns: dict[str, dict[str, str]],

@@ -37,6 +37,9 @@ class TableInfo:
     columns: tuple[ColumnInfo, ...]
     row_count: int
 
+    def column(self, name: str) -> ColumnInfo | None:
+        return next((column for column in self.columns if column.name == name), None)
+
 
 @dataclass(frozen=True)
 class DatasetInventory:
@@ -172,12 +175,53 @@ class Catalog:
                 validate_rate REAL NOT NULL DEFAULT 0,
                 sample_size INTEGER NOT NULL DEFAULT 0,
                 candidates_json TEXT NOT NULL DEFAULT '[]',
+                detected_type TEXT,
+                detected_confidence TEXT,
+                override_decision TEXT,
+                override_reason TEXT,
+                override_dataset TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (dataset_fingerprint, table_name, column_name)
             );
+            CREATE TABLE IF NOT EXISTS adjudications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_fingerprint TEXT NOT NULL,
+                dataset_path TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                override_fingerprint TEXT NOT NULL,
+                detected_type TEXT,
+                detected_confidence TEXT,
+                effective_type TEXT,
+                effective_confidence TEXT,
+                policy_conflict TEXT,
+                applied_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS adjudications_by_dataset
+                ON adjudications (dataset_fingerprint, table_name, column_name);
             """
         )
+        self._migrate_findings_columns()
         self.conn.commit()
+
+    def _migrate_findings_columns(self) -> None:
+        """Add adjudication columns to databases created before this feature."""
+        existing = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(findings)").fetchall()
+        }
+        for name, definition in (
+            ("detected_type", "TEXT"),
+            ("detected_confidence", "TEXT"),
+            ("override_decision", "TEXT"),
+            ("override_reason", "TEXT"),
+            ("override_dataset", "TEXT"),
+        ):
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE findings ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
         self.conn.close()
@@ -234,13 +278,15 @@ class Catalog:
         return item
 
     def save_finding(self, record: dict[str, Any]) -> None:
+        override = record.get("override") or {}
         self.conn.execute(
             """
             INSERT INTO findings (
                 dataset_fingerprint, table_name, column_name, sensitive_type,
                 confidence, score, hit_rate, validate_rate, sample_size,
-                candidates_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                candidates_json, detected_type, detected_confidence,
+                override_decision, override_reason, override_dataset, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dataset_fingerprint, table_name, column_name) DO UPDATE SET
                 sensitive_type=excluded.sensitive_type,
                 confidence=excluded.confidence,
@@ -249,6 +295,11 @@ class Catalog:
                 validate_rate=excluded.validate_rate,
                 sample_size=excluded.sample_size,
                 candidates_json=excluded.candidates_json,
+                detected_type=excluded.detected_type,
+                detected_confidence=excluded.detected_confidence,
+                override_decision=excluded.override_decision,
+                override_reason=excluded.override_reason,
+                override_dataset=excluded.override_dataset,
                 updated_at=excluded.updated_at
             """,
             (
@@ -262,10 +313,59 @@ class Catalog:
                 float(record.get("validate_rate", 0.0)),
                 int(record.get("sample_size", 0)),
                 json.dumps(record.get("candidates", []), ensure_ascii=False),
+                record.get("detected_type"),
+                record.get("detected_confidence"),
+                override.get("decision"),
+                override.get("reason"),
+                override.get("dataset"),
                 _now(),
             ),
         )
         self.conn.commit()
+
+    def record_adjudication(self, record: dict[str, Any]) -> int:
+        """Append one adjudication row; returns its row id."""
+        cursor = self.conn.execute(
+            """
+            INSERT INTO adjudications (
+                dataset_fingerprint, dataset_path, table_name, column_name,
+                decision, reason, operator, override_fingerprint, detected_type,
+                detected_confidence, effective_type, effective_confidence,
+                policy_conflict, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["dataset_fingerprint"],
+                record["dataset_path"],
+                record["table_name"],
+                record["column_name"],
+                record["decision"],
+                record["reason"],
+                record["operator"],
+                record["override_fingerprint"],
+                record.get("detected_type"),
+                record.get("detected_confidence"),
+                record.get("effective_type"),
+                record.get("effective_confidence"),
+                json.dumps(record.get("policy_conflict"), ensure_ascii=False),
+                _now(),
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def adjudications_for(self, fingerprint: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM adjudications WHERE dataset_fingerprint = ? "
+            "ORDER BY id",
+            (fingerprint,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["policy_conflict"] = json.loads(item["policy_conflict"])
+            result.append(item)
+        return result
 
     def findings_for(self, fingerprint: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -277,6 +377,19 @@ class Catalog:
         for row in rows:
             item = dict(row)
             item["candidates"] = json.loads(item.pop("candidates_json"))
+            if item.get("override_decision"):
+                item["override"] = {
+                    "decision": item["override_decision"],
+                    "reason": item["override_reason"],
+                    "dataset": item["override_dataset"],
+                    "table": item["table_name"],
+                    "column": item["column_name"],
+                }
+                item["forced"] = item["override_decision"] == "force_sensitive"
+                item["suppressed"] = item["override_decision"] != "force_sensitive"
+            if item.get("detected_confidence") is None:
+                item["detected_type"] = item.get("sensitive_type")
+                item["detected_confidence"] = item.get("confidence")
             result.append(item)
         return result
 

@@ -35,8 +35,18 @@ class DetectionResult:
     hit_rate: float
     validate_rate: float
     candidates: tuple[Candidate, ...] = field(default_factory=tuple)
+    # What the detectors alone concluded. `confidence`/`sensitive_type` may be
+    # rewritten by a human adjudication, but this snapshot never is, so reports
+    # can always show the detector verdict next to the final verdict.
+    detected_type: str | None = None
+    detected_confidence: str | None = None
 
     def to_record(self, dataset_fingerprint: str, table: str, column: str) -> dict[str, Any]:
+        detected_type = self.detected_type
+        detected_confidence = self.detected_confidence
+        if detected_confidence is None:
+            detected_type = self.sensitive_type
+            detected_confidence = self.confidence
         return {
             "dataset_fingerprint": dataset_fingerprint,
             "table_name": table,
@@ -48,6 +58,8 @@ class DetectionResult:
             "validate_rate": self.validate_rate,
             "sample_size": self.sample_size,
             "candidates": [item.to_dict() for item in self.candidates],
+            "detected_type": detected_type,
+            "detected_confidence": detected_confidence,
         }
 
 

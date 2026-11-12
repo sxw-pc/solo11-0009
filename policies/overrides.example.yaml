@@ -1,0 +1,29 @@
+# Example human adjudications for the synthetic data produced by `maskline demo`.
+#
+# Copy this file to `<workspace>/overrides.yaml` (or pass `--overrides`) to
+# apply. Every entry needs a decision and a reason. The operator identity is
+# required and comes from MASKLINE_OPERATOR (or --operator).
+#
+# These two entries demonstrate the acceptance cases:
+#   - `customers.address`: detector says address, reviewer says it is only a
+#     city-level value -> force_not_sensitive (removes a false positive).
+#   - `orders.order_no`: detector says nothing, reviewer says it is an internal
+#     identifier that must be treated as sensitive -> force_sensitive.
+#
+# With the example policy, `customers.address` is also generalized by the
+# policy. That is a deliberate conflict: the report warns about it and the
+# execution still masks the column. Never under-mask.
+version: 1
+description: Example adjudications for the demo fixture.
+
+overrides:
+  - dataset: demo.sqlite
+    table: customers
+    column: address
+    decision: force_not_sensitive
+    reason: 人工确认该列仅为城市级地址（无门牌、无姓名），不构成可识别个人信息
+  - dataset: demo.sqlite
+    table: orders
+    column: order_no
+    decision: force_sensitive
+    reason: 订单号是内部可追踪标识，检测器漏报，按敏感字段处理

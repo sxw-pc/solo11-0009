@@ -56,7 +56,14 @@ def run_demo(
         raise FileNotFoundError(f"example policy not found: {policy_file}")
     policy = load_policy(policy_file)
     secret_store = _secret_store(paths)
-    summaries = scan_paths([paths.raw_dir], paths, sample_limit=sample_limit)
+    summaries = scan_paths(
+        [paths.raw_dir],
+        paths,
+        sample_limit=sample_limit,
+        # The demo is self-contained synthetic data; never let a stray
+        # workspace overrides.yaml change its output.
+        use_default_overrides=False,
+    )
     result = DemoResult(workspace=paths.root, policy=policy)
     print(f"Workspace : {paths.root}")
     print(f"Policy    : {policy.name} ({policy.fingerprint[:16]}...)")
@@ -81,7 +88,8 @@ def run_demo(
             batch_size=batch_size,
         )
         artifacts = finalize_run(
-            paths, summary.inventory, policy, run_result, summary.findings
+            paths, summary.inventory, policy, run_result, summary.findings,
+            adjudications=summary.adjudications,
         )
         result.runs.append(run_result)
         report_md = artifacts["report"]["markdown"]

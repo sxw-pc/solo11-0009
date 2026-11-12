@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -34,6 +35,28 @@ def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
         for chunk in iter(lambda: fh.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def path_matches(pattern: str, path: Path) -> bool:
+    """Match a dataset pattern against its filename, full path, or suffix.
+
+    Shell-style wildcards are supported. Used by both policy and override
+    dataset matching so the two files use identical path semantics.
+    """
+    if not pattern or not pattern.strip():
+        return False
+    normalized = pattern.replace("\\", "/")
+    variants = {
+        path.name,
+        path.as_posix(),
+        str(path),
+    }
+    return any(
+        fnmatch.fnmatchcase(candidate, normalized)
+        or fnmatch.fnmatchcase(candidate.replace("\\", "/"), normalized)
+        or fnmatch.fnmatchcase(candidate, f"*{normalized}")
+        for candidate in variants
+    )
 
 
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
