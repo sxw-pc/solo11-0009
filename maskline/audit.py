@@ -153,6 +153,35 @@ def build_audit_entry(
         "output_path": str(result.output_path) if result.output_path else None,
         "output_hash": result.output_hash,
         "elapsed_seconds": round(result.elapsed_seconds, 6),
+        "secret_fingerprint": getattr(result, "secret_fingerprint", None),
+    }
+    if extra:
+        entry.update(extra)
+    return entry
+
+
+def build_rejection_entry(
+    operation: str,
+    reason: str,
+    *,
+    presented_fingerprint: str | None = None,
+    run_id: str | None = None,
+    token: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Audit record for a refused operation (e.g. wrong key on resume/reveal).
+
+    Only the presented fingerprint is recorded — never secret material — and
+    the expected fingerprint is intentionally omitted so the log cannot be
+    used as an oracle to confirm guesses.
+    """
+    entry: dict[str, Any] = {
+        "event": "operation_rejected",
+        "operation": operation,
+        "reason": reason,
+        "run_id": run_id,
+        "token": token,
+        "presented_secret_fingerprint": presented_fingerprint,
     }
     if extra:
         entry.update(extra)

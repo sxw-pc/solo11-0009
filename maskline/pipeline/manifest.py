@@ -20,6 +20,17 @@ def previous_manifest(manifest_dir: Path, dataset_fingerprint: str) -> dict[str,
     return read_json(manifest_path(manifest_dir, dataset_fingerprint))
 
 
+def manifest_secret_fingerprint(
+    manifest_dir: Path, dataset_fingerprint: str
+) -> str | None:
+    """Fingerprint recorded in a manifest, or None for legacy manifests."""
+    previous = previous_manifest(manifest_dir, dataset_fingerprint)
+    if not previous:
+        return None
+    fingerprint = previous.get("secret_fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else None
+
+
 def policy_changed(
     manifest_dir: Path, dataset_fingerprint: str, policy_fingerprint: str
 ) -> bool:
@@ -39,6 +50,7 @@ def write_manifest(
     row_count: int,
     transformer_map: dict[str, dict[str, str]],
     transform_counts: dict[str, dict[str, int]],
+    secret_fingerprint: str | None = None,
 ) -> tuple[Path, bool]:
     previous = previous_manifest(manifest_dir, inventory.fingerprint)
     changed = bool(
@@ -53,6 +65,7 @@ def write_manifest(
         "policy_fingerprint": policy.fingerprint,
         "policy_changed": changed,
         "previous_policy_fingerprint": (previous or {}).get("policy_fingerprint"),
+        "secret_fingerprint": secret_fingerprint,
         "output": str(output_path),
         "output_hash": output_hash,
         "row_count": row_count,

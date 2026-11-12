@@ -20,9 +20,12 @@ class RunRecord:
     status: str
     started_at: str
     updated_at: str
+    secret_fingerprint: str | None = None
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "RunRecord":
-        return cls(**{key: row[key] for key in row.keys()})
+        data = {key: row[key] for key in row.keys()}
+        data.setdefault("secret_fingerprint", None)
+        return cls(**data)
 
 
 @dataclass(frozen=True)
@@ -53,7 +56,8 @@ class CheckpointStore:
                 output_path TEXT NOT NULL,
                 status TEXT NOT NULL,
                 started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                secret_fingerprint TEXT
             );
             CREATE TABLE IF NOT EXISTS checkpoints (
                 run_id TEXT NOT NULL,
@@ -66,7 +70,16 @@ class CheckpointStore:
             );
             """
         )
+        self._migrate_runs_table()
         self.conn.commit()
+
+    def _migrate_runs_table(self) -> None:
+        """Add the secret_fingerprint column to databases from older versions."""
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        if "secret_fingerprint" not in columns:
+            self.conn.execute(
+                "ALTER TABLE runs ADD COLUMN secret_fingerprint TEXT"
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -79,11 +92,18 @@ class CheckpointStore:
 
     def create_run(self, record: RunRecord) -> None:
         self.conn.execute(
-            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO runs (
+                run_id, dataset_path, dataset_fingerprint, policy_path,
+                policy_fingerprint, output_path, status, started_at,
+                updated_at, secret_fingerprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 record.run_id, record.dataset_path, record.dataset_fingerprint,
                 record.policy_path, record.policy_fingerprint, record.output_path,
                 record.status, record.started_at, record.updated_at,
+                record.secret_fingerprint,
             ),
         )
         self.conn.commit()

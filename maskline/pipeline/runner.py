@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..config import Paths, SecretStore
+from ..config import (
+    Paths,
+    SecretFingerprintMismatch,
+    SecretStore,
+    verify_secret_fingerprint,
+)
 from ..policies import DatasetRule, Policy
 from ..pseudomap import PseudoMap
 from ..registry import DatasetInventory, TableInfo
@@ -18,7 +23,7 @@ from ..transformers import TransformContext
 from ..utils import sqlite_content_digest
 from .checkpoint import CheckpointStore, RunRecord, TableCheckpoint
 from .errors import PipelineError, PipelineInterrupted
-from .manifest import write_manifest
+from .manifest import manifest_secret_fingerprint, previous_manifest, write_manifest
 from .steps import (
     create_target,
     insert_batch,
@@ -45,6 +50,7 @@ class RunResult:
     table_rows: dict[str, int] = field(default_factory=dict)
     policy_changed: bool = False
     dry_run: bool = False
+    secret_fingerprint: str | None = None
 
 
 def _transformer_map(rule: DatasetRule) -> dict[str, dict[str, str]]:
@@ -70,6 +76,7 @@ def _prepare_target(
     run_id: str,
     resume_run_id: str | None,
     output_path: str | Path | None,
+    secret_fingerprint: str | None,
 ) -> Path:
     if resume_run_id:
         record = store.get_run(run_id)
@@ -81,6 +88,14 @@ def _prepare_target(
             raise PipelineError("dataset content changed since the interrupted run")
         if record.policy_fingerprint != policy.fingerprint:
             raise PipelineError("policy changed since the interrupted run")
+        if secret_fingerprint is not None:
+            # Runs created before fingerprinting have NULL here: warn, allow.
+            verify_secret_fingerprint(
+                secret_fingerprint,
+                record.secret_fingerprint,
+                operation="resume",
+                artifact=f"run {run_id}",
+            )
         output = Path(record.output_path)
         if not output.exists():
             raise PipelineError(f"target database is missing: {output}")
@@ -98,6 +113,7 @@ def _prepare_target(
         RunRecord(
             run_id, str(inventory.path), inventory.fingerprint, str(policy.source_path),
             policy.fingerprint, str(output), "running", now, now,
+            secret_fingerprint,
         )
     )
     return output
@@ -161,6 +177,25 @@ def execute_run(
         raise PipelineError("dry-run cannot be combined with resume")
     started = time.monotonic()
     run_id = resume_run_id or new_run_id()
+    secret_fingerprint = (
+        secrets_store.fingerprint if secrets_store is not None else None
+    )
+    if (
+        not dry_run
+        and resume_run_id is None
+        and secret_fingerprint is not None
+        and previous_manifest(paths.manifest_dir, inventory.fingerprint) is not None
+    ):
+        # A manifest already exists for this dataset. Re-masking with a
+        # different key must fail loudly instead of silently producing
+        # incompatible output; legacy manifests without a fingerprint field
+        # produce a warning and are allowed.
+        verify_secret_fingerprint(
+            secret_fingerprint,
+            manifest_secret_fingerprint(paths.manifest_dir, inventory.fingerprint),
+            operation="run",
+            artifact="existing manifest for this dataset",
+        )
     store: CheckpointStore | None = None
     target: sqlite3.Connection | None = None
     mapping: PseudoMap | None = None
@@ -169,12 +204,16 @@ def execute_run(
             paths.ensure_runtime_dirs()
             store = CheckpointStore(paths.checkpoint_db)
             output = _prepare_target(
-                inventory, policy, paths, store, run_id, resume_run_id, output_path
+                inventory, policy, paths, store, run_id, resume_run_id,
+                output_path, secret_fingerprint,
             )
             if _requires_secret(rule):
                 if secrets_store is None:
                     raise PipelineError("this policy requires MASKLINE_SECRET_FILE")
-                mapping = PseudoMap(paths.pseudomap_db, create=True)
+                mapping = PseudoMap(
+                    paths.pseudomap_db, create=True,
+                    secret_fingerprint=secret_fingerprint,
+                )
             target = sqlite3.connect(output)
             target.execute("PRAGMA journal_mode=DELETE")
             context = TransformContext(
@@ -217,6 +256,7 @@ def execute_run(
                 transform_counts=dry_counts, transformer_map=transformer_map,
                 table_rows={table.name: table.row_count for table in inventory.tables},
                 policy_changed=False, dry_run=True,
+                secret_fingerprint=secret_fingerprint,
             )
         assert store is not None and output is not None
         store.set_status(run_id, "completed")
@@ -229,7 +269,7 @@ def execute_run(
         row_count = sum(table_rows.values())
         _manifest, changed = write_manifest(
             paths.manifest_dir, inventory, policy, run_id, output, output_hash,
-            row_count, transformer_map, final_counts,
+            row_count, transformer_map, final_counts, secret_fingerprint,
         )
         return RunResult(
             run_id=run_id, dataset_path=inventory.path,
@@ -239,10 +279,15 @@ def execute_run(
             elapsed_seconds=time.monotonic() - started,
             transform_counts=final_counts, transformer_map=transformer_map,
             table_rows=table_rows, policy_changed=changed, dry_run=False,
+            secret_fingerprint=secret_fingerprint,
         )
     except PipelineInterrupted:
         if store is not None:
             store.set_status(run_id, "interrupted")
+        raise
+    except SecretFingerprintMismatch:
+        # A rejected key must not alter the run's lifecycle: nothing was
+        # processed, and the operator may retry resume with the correct key.
         raise
     except Exception:
         if store is not None:

@@ -8,8 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .audit import AuditLog, read_audit_entries
-from .config import Paths, SecretStore
+from .audit import AuditLog, build_rejection_entry, read_audit_entries
+from .config import (
+    Paths,
+    SecretFingerprintMismatch,
+    SecretStore,
+    verify_secret_fingerprint,
+)
 from .detectors.engine import detect_inventory
 from .policies import PolicyError, load_policy
 from .pipeline.checkpoint import CheckpointStore
@@ -64,6 +69,26 @@ def _paths(args: argparse.Namespace) -> Paths:
     return Paths.for_workspace(args.workspace)
 
 
+def _record_rejection(
+    paths: Paths,
+    operation: str,
+    reason: str,
+    *,
+    presented_fingerprint: str | None = None,
+    run_id: str | None = None,
+    token: str | None = None,
+) -> None:
+    """Persist a refused operation to the audit log without leaking secrets."""
+    entry = build_rejection_entry(
+        operation,
+        reason,
+        presented_fingerprint=presented_fingerprint,
+        run_id=run_id,
+        token=token,
+    )
+    AuditLog(paths.audit_path).append(entry)
+
+
 def _print_scan(summaries: list[Any]) -> None:
     for summary in summaries:
         inventory = summary.inventory
@@ -113,15 +138,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
         summaries = scan_paths([dataset], paths, sample_limit=args.sample_limit)
         findings = summaries[0].findings
         secrets_store = SecretStore.from_env() if needs_secret(policy, inventory) else None
-    result = execute_run(
-        inventory,
-        policy,
-        paths,
-        secrets_store=secrets_store,
-        batch_size=args.batch_size,
-        dry_run=args.dry_run,
-        output_path=args.output,
-    )
+    try:
+        result = execute_run(
+            inventory,
+            policy,
+            paths,
+            secrets_store=secrets_store,
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+            output_path=args.output,
+        )
+    except SecretFingerprintMismatch as exc:
+        _record_rejection(
+            paths,
+            "run",
+            str(exc),
+            presented_fingerprint=secrets_store.fingerprint
+            if secrets_store is not None
+            else None,
+        )
+        raise
     print(
         f"run={result.run_id} rows={result.row_count} elapsed={result.elapsed_seconds:.3f}s"
     )
@@ -162,14 +198,26 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     summaries = scan_paths([dataset], paths, sample_limit=args.sample_limit)
     findings = summaries[0].findings
     secrets_store = SecretStore.from_env() if needs_secret(policy, inventory) else None
-    result = execute_run(
-        inventory,
-        policy,
-        paths,
-        secrets_store=secrets_store,
-        batch_size=args.batch_size,
-        resume_run_id=args.run_id,
-    )
+    try:
+        result = execute_run(
+            inventory,
+            policy,
+            paths,
+            secrets_store=secrets_store,
+            batch_size=args.batch_size,
+            resume_run_id=args.run_id,
+        )
+    except SecretFingerprintMismatch as exc:
+        _record_rejection(
+            paths,
+            "resume",
+            str(exc),
+            presented_fingerprint=secrets_store.fingerprint
+            if secrets_store is not None
+            else None,
+            run_id=args.run_id,
+        )
+        raise
     artifacts = finalize_run(paths, inventory, policy, result, findings)
     print(f"resumed={result.run_id} rows={result.row_count}")
     print(f"output={result.output_path}")
@@ -179,11 +227,32 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 def _cmd_reveal(args: argparse.Namespace) -> int:
     paths = _paths(args)
-    try:
-        with PseudoMap(paths.pseudomap_db) as mapping:
+    with PseudoMap(paths.pseudomap_db) as mapping:
+        recorded = mapping.secret_fingerprint
+        # reveal always requires presenting a key file. Mapping databases
+        # created before fingerprinting return None here: verify... warns and
+        # allows instead of locking existing data; a hard mismatch raises.
+        secrets_store = SecretStore.from_env()
+        try:
+            verify_secret_fingerprint(
+                secrets_store.fingerprint,
+                recorded,
+                operation="reveal",
+                artifact="pseudonym mapping database",
+            )
+        except SecretFingerprintMismatch as exc:
+            _record_rejection(
+                paths,
+                "reveal",
+                str(exc),
+                presented_fingerprint=secrets_store.fingerprint,
+                token=args.token,
+            )
+            raise
+        try:
             plaintext = mapping.reveal(args.token)
-    except PseudoMapError as exc:
-        raise MasklineError(str(exc)) from exc
+        except PseudoMapError as exc:
+            raise MasklineError(str(exc)) from exc
     print(plaintext)
     return 0
 
@@ -201,10 +270,18 @@ def _cmd_audit(args: argparse.Namespace) -> int:
         raise MasklineError(f"audit log not found: {paths.audit_path}")
     entries = read_audit_entries(paths.audit_path)
     for entry in entries[-args.tail:]:
+        if entry.get("event") == "operation_rejected":
+            print(
+                f"seq={entry.get('seq')} REJECTED op={entry.get('operation')} "
+                f"run={entry.get('run_id')} token={entry.get('token')} "
+                f"presented={str(entry.get('presented_secret_fingerprint', ''))[:23]}..."
+            )
+            continue
         print(
             f"seq={entry.get('seq')} run={entry.get('run_id')} "
             f"rows={entry.get('rows_processed')} "
             f"policy={entry.get('policy_fingerprint', '')[:16]}... "
+            f"secret={str(entry.get('secret_fingerprint', ''))[:23]}... "
             f"output_hash={entry.get('output_hash', '')[:16]}..."
         )
     return 0

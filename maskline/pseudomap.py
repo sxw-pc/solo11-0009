@@ -25,7 +25,10 @@ class PseudonymCollision(PseudoMapError):
 
 class PseudoMap:
 
-    def __init__(self, path: str | Path, create: bool = False) -> None:
+    def __init__(
+        self, path: str | Path, create: bool = False,
+        secret_fingerprint: str | None = None,
+    ) -> None:
         self.path = Path(path)
         if create:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,11 +45,46 @@ class PseudoMap:
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pseudomap_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        if secret_fingerprint is not None:
+            existing = self.secret_fingerprint
+            if existing is not None and existing != secret_fingerprint:
+                # The mapping database is key-bound: tokens from another key
+                # must never be mixed into it. Neither digest is included in
+                # the message. Legacy databases have no row and get backfilled.
+                self.conn.close()
+                raise PseudoMapError(
+                    "secret fingerprint mismatch: this pseudonym mapping "
+                    "database was created with a different secret file; "
+                    "refusing to open it for writing"
+                )
+            self.conn.execute(
+                """
+                INSERT INTO pseudomap_meta (key, value) VALUES ('secret_fingerprint', ?)
+                ON CONFLICT(key) DO NOTHING
+                """,
+                (secret_fingerprint,),
+            )
         self.conn.commit()
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+
+    @property
+    def secret_fingerprint(self) -> str | None:
+        """Fingerprint of the key that owns this mapping; None for legacy DBs."""
+        row = self.conn.execute(
+            "SELECT value FROM pseudomap_meta WHERE key = 'secret_fingerprint'"
+        ).fetchone()
+        return row[0] if row else None
 
     def close(self) -> None:
         self.commit()

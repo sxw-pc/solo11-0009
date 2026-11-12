@@ -175,7 +175,7 @@ python -m maskline run --dataset data/raw/demo.sqlite \
 # 续跑被中断的 run（run_id 在错误信息、报告或清单中）
 python -m maskline resume --run-id run-xxxxxxxx-xxxxxx
 
-# 用映射库还原某个假名 token
+# 用映射库还原某个假名 token（同样要求出示原始密钥文件）
 python -m maskline reveal --token psn_xxxxxxxx
 
 # 校验哈希链（含尾部截断锚点）
@@ -190,6 +190,7 @@ python -m maskline audit --verify
 - **执行幂等**：同一数据集 + 同一策略 + 同一密钥，输出库内容哈希一致。
 - **断点续跑**：每批提交目标库后记录 rowid 检查点；`resume` 会使用同一 run_id 继续，重复批次通过删除范围后重插保证至少一次执行不产生重复行。
 - **策略变更**：策略指纹基于规范化后的策略内容；变化时 manifest 会标记 `policy_changed: true`。
+- **密钥指纹**：加载密钥文件后立即对解析后的密钥内容计算不可逆指纹 `sha256:v1:<digest>`（规范化 JSON + SHA-256，跨机器/跨版本稳定，注释、键序和引号不影响结果，且无法反推密钥）。指纹写入每次运行的 manifest、检查点 run 记录、假名映射库元数据与审计事件。`resume`、`reveal` 以及对已有数据集重新 `run` 时会重新计算并比对：不一致直接拒绝执行，错误信息不含任何密钥材料，并在审计日志追加 `operation_rejected` 记录。指纹机制上线前产生的老 manifest / 老映射库 / 老检查点没有指纹字段，按**警告并放行**处理，不会锁死存量数据；新运行会自动回填指纹。
 - **源数据只读**：拒绝把输出路径指向源文件。
 - **dry-run** 不创建任何运行期文件。
 - **映射库 / 审计头文件 / 密钥文件**都必须单独保护；映射库可直接还原全部假名。

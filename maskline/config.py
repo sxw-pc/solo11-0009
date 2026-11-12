@@ -6,19 +6,92 @@ are independent high-entropy values supplied through MASKLINE_SECRET_FILE.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 import yaml
 
-from .utils import MasklineError, atomic_write_text
+from .utils import MasklineError, atomic_write_text, canonical_json
 
 
 class ConfigError(MasklineError):
     pass
+
+
+# Versioned, irreversible fingerprint for the *content* of a secret file.
+# The fingerprint is derived from the parsed secret values rather than raw
+# file bytes, so comments, ordering and quoting cannot change it. The version
+# prefix keeps future algorithm changes distinguishable. SHA-256 over a
+# canonical JSON encoding is deterministic across machines, Python versions
+# and runs, and does not allow recovering any secret value.
+SECRET_FINGERPRINT_VERSION = "v1"
+SECRET_FINGERPRINT_PREFIX = f"sha256:{SECRET_FINGERPRINT_VERSION}:"
+
+
+class SecretFingerprintMismatch(MasklineError):
+    """A presented secret file does not match the fingerprint on record.
+
+    The message deliberately never includes either fingerprint value or any
+    secret content, so it is safe to surface to operators and to log.
+    """
+
+    def __init__(self, operation: str) -> None:
+        super().__init__(
+            f"secret fingerprint mismatch: the secret file presented for "
+            f"{operation!r} does not match the key recorded for this artifact; "
+            f"refusing to continue (no secret material is shown here)"
+        )
+        self.operation = operation
+
+
+def secret_fingerprint(values: Mapping[str, str]) -> str:
+    """Stable, irreversible fingerprint of a set of secret values.
+
+    Same values always produce the same fingerprint regardless of file
+    formatting, host, OS or Python version; different values produce
+    unrelated digests. Only the parsed values are fingerprinted, never the
+    raw file text.
+    """
+    payload = canonical_json(dict(sorted(values.items())))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return SECRET_FINGERPRINT_PREFIX + digest
+
+
+def same_secret_fingerprint(left: str | None, right: str | None) -> bool:
+    """Constant-time comparison; missing fingerprints never count as equal."""
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    return hmac.compare_digest(left, right)
+
+
+def verify_secret_fingerprint(
+    presented: str, recorded: str | None, *, operation: str, artifact: str = "artifact"
+) -> str:
+    """Compare a presented fingerprint against one stored on an artifact.
+
+    Returns one of:
+      * ``"match"``    - recorded fingerprint present and identical;
+      * ``"legacy"``   - the artifact predates fingerprint tracking, so the
+                         caller should warn but allow the operation;
+      * raises SecretFingerprintMismatch on a hard mismatch.
+    """
+    if recorded is None:
+        warnings.warn(
+            f"{artifact} has no secret fingerprint (created by an older "
+            f"maskline version); cannot verify that the presented key is the "
+            f"original one, allowing {operation!r} for backward compatibility",
+            stacklevel=2,
+        )
+        return "legacy"
+    if same_secret_fingerprint(presented, recorded):
+        return "match"
+    raise SecretFingerprintMismatch(operation)
 
 
 @dataclass(frozen=True)
@@ -79,6 +152,12 @@ class SecretStore:
     def __init__(self, values: Mapping[str, str], source: Path) -> None:
         self._values = dict(values)
         self.source = source
+
+    @property
+    def fingerprint(self) -> str:
+        """Irreversible identity of the secret content for manifests/audit."""
+        return secret_fingerprint(self._values)
+
     @classmethod
     def from_file(cls, path: str | Path) -> "SecretStore":
         secret_path = Path(path).expanduser()
