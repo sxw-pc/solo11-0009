@@ -92,22 +92,50 @@ def read_csv_header(path: Path) -> list[str]:
     return header
 
 
-def iter_csv_dicts(path: Path) -> Iterator[dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            yield {key: (value if value is not None else "") for key, value in row.items()}
+def _is_blank_csv_record(row: list[str]) -> bool:
+    """True for records that carry no data at all.
+
+    Covers truly empty lines (csv.reader yields ``[]``) and lines made of
+    commas only (every field parses to ``""``). Such lines are export
+    noise, not records.
+    """
+    return all(field == "" for field in row)
 
 
 def iter_csv_tuples(path: Path) -> Iterator[tuple[str, ...]]:
+    """Yield the canonical data records of a CSV file, aligned to its header.
+
+    This is the single record stream shared by inventory/fingerprinting,
+    scan sampling, masking runs, and reports, so every stage sees the same
+    rows in the same order and column position:
+
+    - empty fields (middle ones included) stay exactly where they are in
+      the row; values never shift across columns;
+    - rows shorter than the header are padded with ``""`` so missing
+      trailing columns read as empty strings;
+    - rows longer than the header (e.g. stray trailing commas) are
+      truncated, so no phantom column appears;
+    - blank records (empty lines or lines of commas only) are dropped and
+      are never counted or written as data.
+    """
     header = read_csv_header(path)
+    width = len(header)
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.reader(fh)
-        next(reader)
+        next(reader)  # discard the header row; already validated above
         for row in reader:
-            if len(row) < len(header):
-                row = row + [""] * (len(header) - len(row))
-            yield tuple(row[: len(header)])
+            if _is_blank_csv_record(row):
+                continue
+            if len(row) < width:
+                row = row + [""] * (width - len(row))
+            yield tuple(row[:width])
+
+
+def iter_csv_dicts(path: Path) -> Iterator[dict[str, str]]:
+    """Row dicts built on the canonical record stream (see iter_csv_tuples)."""
+    header = read_csv_header(path)
+    for row in iter_csv_tuples(path):
+        yield dict(zip(header, row))
 
 
 def iter_table_rows(
